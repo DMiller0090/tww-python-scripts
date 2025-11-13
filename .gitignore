@@ -1,0 +1,73 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C-extensions
+*.pyd
+*.so
+*.dll
+
+# Packaging / build
+.Python
+build/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+wheels/
+pip-wheel-metadata/
+sdist/
+lib/
+lib64/
+share/python-wheels/
+.installed.cfg
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# Notebooks (if any)
+.ipynb_checkpoints/
+
+# Testing / coverage / type-checkers / linters
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.code-workspace
+*.suo
+*.sln
+*.sw?
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & env
+*.log
+.env
+.env.*
+
+
+# Dolphin artifacts
+python-embed/
+*.sav
+*.state
+*.dtm
