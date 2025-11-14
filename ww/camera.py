@@ -41,6 +41,7 @@ def event_mode(default: int = -1) -> int:
     Camera event mode.
     """
     try:
-        return mem.read_u8(_ADDR_EVENT_MODE)
+        addr = mem.resolve_address(_ADDR_EVENT_MODE)
+        return mem.read_u8(addr)
     except Exception:
         return default

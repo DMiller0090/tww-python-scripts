@@ -176,7 +176,6 @@ def _apply_angle_corrections(
     return wrap_deg(angle_deg)
 
 def _dest_angle_deg(dest_x: float, dest_z: float, src_x: float, src_z: float) -> float:
-    # Lua convention: atan2(destX - srcX, destZ - srcZ)
     return wrap_deg(math.degrees(math.atan2(dest_x - src_x, dest_z - src_z)))
 
 def stick_for_destination(

@@ -1,4 +1,4 @@
-# superswim_to_facing_dir.py
+# ss_charge_facing_dir.py
 """
 Charges a superswim at player's facing direction, independent of camera.
 Outputs number of inputs dropped.

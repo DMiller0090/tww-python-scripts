@@ -66,7 +66,7 @@ class Player(Actor):
     def state(self, default: int = 0) -> int:
         off = mem.resolve_address(_OFF_PLAYER_STATE)
         if not (self._valid and isinstance(off, int)): return default
-        try: return int(mem.read_u16(self.base + off))
+        try: return int(mem.read_u32(self.base + off))
         except Exception: return default
 
     def anim_pos(self, default: float = 0.0) -> float:

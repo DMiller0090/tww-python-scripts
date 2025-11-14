@@ -4,9 +4,9 @@ Thin, typed wrappers over Dolphin's memory API + safe pointer helpers.
 Design goals:
 - Keep EVERYTHING side-effect-free and importable outside Dolphin for type-checking.
 - Prefer JP addresses by default, but transparently use `ww.versioning.resolve_address`
-  if you later add a versioning module.
+  if we later add a versioning module.
 - Fail “softly” for missing addresses (return 0/0.0) while logging a single warning
-  per missing key so single-purpose scripts keep running and you get a TODO list.
+  per missing key so single-purpose scripts keep running and we get a TODO list.
 """
 
 from __future__ import annotations
