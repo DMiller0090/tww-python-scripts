@@ -190,7 +190,7 @@ def update():
                     earliestPullCraneFrame = pullCraneFrame
                     if autoReducePullCraneFrame and (minPullCraneFrame == earliestPullCraneFrame):
                         minPullCraneFrame -= 1
-                        # pullCraneFrameRange += 1  # widen search range
+                        pullCraneFrameRange += 1  # widen search range
 
             # Link opening chest state (211)
             if linkState == 211:
