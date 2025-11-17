@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from ww.addresses.address import Address
+
 from . import memory as mem
 
 
@@ -40,9 +42,9 @@ def _flags_raw(default: int = 0) -> int:
     if ptr_addr is None or off is None:
         # Region not populated yet; warn once per missing symbol and return default.
         if ptr_addr is None:
-            mem._warn_once(f"Missing address for key '{_ADDR_COLLISION_PTR}'")
+            mem._warn_once(f"Missing address for Address.COLLISION_POINTER")
         if off is None:
-            mem._warn_once(f"Missing address for key '{_OFF_COLLISION_FLAGS}'")
+            mem._warn_once(f"Missing address for Address.COLLISION_OFFSET'")
         return default
 
     base = mem.read_pointer(ptr_addr)
