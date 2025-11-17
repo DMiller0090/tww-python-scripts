@@ -9,9 +9,13 @@ from typing import Optional
 from dolphin import event, controller, gui
 from ww.actors import Player
 from ww import analog, game
+from ww.context.context import set_region
+from ww.context.detect import detect_region
 
 # --- knobs ---
 START_FACING_DEST = True # set this to True if starting swim facing destination
+
+set_region(detect_region())
 
 analog.load_table()
 # state

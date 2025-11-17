@@ -1,6 +1,8 @@
 # ww/actors/tbox.py
 from __future__ import annotations
 from typing import Optional, Tuple
+
+from ww.addresses.address import Address
 from .. import memory as mem
 from ..actor import Actor, proc_id
 from . import register

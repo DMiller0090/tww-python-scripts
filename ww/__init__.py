@@ -33,18 +33,7 @@ from . import collision as collision
 from . import analog as analog
 from . import actor as actor            # base Actor + traversal
 from . import actors as actors          # package with typed actor subclasses
-from . import game as game              # <-- was missing
-# Optional modules
-try:
-    from . import savestate as savestate
-except Exception:
-    savestate = None  # type: ignore
-
-# Convenience: top-level Link class (optional)
-try:
-    from .actors.player import Link as Link  # noqa: F401
-except Exception:
-    Link = None  # type: ignore
+from . import game as game
 
 __all__ = [
     "mathutils",
@@ -55,7 +44,6 @@ __all__ = [
     "actor",
     "actors",
     "game",
-    "savestate",
     "config",
     "Player",
     "PKG_DIR",
