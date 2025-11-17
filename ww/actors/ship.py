@@ -3,15 +3,11 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from ww.actors import register
+from ww.addresses.address import Address
 
 from .. import memory as mem
 from ..actor import Actor, proc_id
 
-
-# Address keys
-_ADDR_SHIP_PTR            = "SHIP_POINTER"                 
-_OFF_CRANE_POS_PTR        = "SHIP_CRANE_POS_PTR_OFFSET"    
-_OFF_SHIP_MODE            = "SHIP_MODE_OFFSET"
 
 _PID = proc_id("PROC_SHIP") # Register proc name
 
@@ -23,7 +19,7 @@ class Ship(Actor):
     __slots__ = ("_valid",)
 
     def __init__(self) -> None:
-        p_addr = mem.resolve_address(_ADDR_SHIP_PTR)
+        p_addr = Address.SHIP_POINTER
         if p_addr is None:
             super().__init__(0); self._valid = False; return
         try:
@@ -37,7 +33,7 @@ class Ship(Actor):
         """Return pointer to crane vec3 (x,y,z) or None if unavailable."""
         if not self._valid:
             return None
-        off = mem.resolve_address(_OFF_CRANE_POS_PTR)
+        off = Address.SHIP_CRANE_POS_PTR_OFFSET
         if not isinstance(off, int):
             return None
         try:
@@ -83,7 +79,7 @@ class Ship(Actor):
         """
         if not self._valid:
             return None
-        off = mem.resolve_address(_OFF_SHIP_MODE)
+        off = Address.SHIP_MODE_OFFSET
         if not isinstance(off, int):
             return None
         try:

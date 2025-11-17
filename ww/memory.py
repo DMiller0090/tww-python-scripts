@@ -3,22 +3,16 @@ Thin, typed wrappers over Dolphin's memory API + safe pointer helpers.
 
 Design goals:
 - Keep EVERYTHING side-effect-free and importable outside Dolphin for type-checking.
-- Prefer JP addresses by default, but transparently use `ww.versioning.resolve_address`
-  if we later add a versioning module.
+- Prefer JP addresses by default, but transparently use `ww.context.detect.detect_region`
 - Fail “softly” for missing addresses (return 0/0.0) while logging a single warning
   per missing key so single-purpose scripts keep running and we get a TODO list.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Tuple, Dict, Callable, Any
+from typing import Optional, Tuple, TYPE_CHECKING, Set, AnyStr
 
-# These imports are available when running inside Dolphin’s Python runtime.
-# Outside Dolphin (e.g., static analysis), they can be type-checked via the .pyi stubs.
-try:
-    from dolphin import memory as dm  # type: ignore
-except Exception:  # pragma: no cover
-    dm = None  # allows offline type checking / docs builds
+from dolphin import memory as dm  # real runtime import
 
 # Default to JP if no versioning module is present.
 try:
@@ -26,17 +20,13 @@ try:
 except Exception:  # pragma: no cover
     _addr_mod = None
 
-# Optional region/version resolver: if present, we’ll prefer it.
-try:
-    from . import versioning as _ver  # type: ignore
-except Exception:  # pragma: no cover
-    _ver = None
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Address resolution & “warn once” book-keeping
 # ──────────────────────────────────────────────────────────────────────────────
 
-_MISSING_SEEN: set[str] = set()
+_MISSING_SEEN : Set[str] = set()
 
 def _warn_once(msg: str) -> None:
     if msg not in _MISSING_SEEN:
@@ -46,35 +36,6 @@ def _warn_once(msg: str) -> None:
 def missing_todos() -> Tuple[str, ...]:
     """Items we warned about already; handy to dump at script end."""
     return tuple(sorted(_MISSING_SEEN))
-
-
-def resolve_address(key: str) -> Optional[int]:
-    """
-    Resolve an address/offset by symbolic key.
-
-    Order:
-      1) ww.versioning.resolve_address(key)  (if module exists)
-      2) ww.addresses.ww_jp.ADDR[key]        (fallback)
-    Returns None if not found.
-    """
-    # 1) Prefer an explicit versioning layer if present.
-    if _ver is not None and hasattr(_ver, "resolve_address"):
-        try:
-            val = _ver.resolve_address(key)  # type: ignore[attr-defined]
-            if isinstance(val, int):
-                return val
-            if val is None:
-                return None
-        except Exception:
-            pass
-
-    # 2) Fallback to JP constants
-    if _addr_mod is not None and hasattr(_addr_mod, "ADDR"):
-        val = _addr_mod.ADDR.get(key)  # type: ignore[attr-defined]
-        if isinstance(val, int):
-            return val
-
-    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -122,7 +83,9 @@ def read_f32(addr: int) -> float:
     _require_dm()
     return float(dm.read_f32(addr))  # type: ignore[union-attr]
 
-
+def read_bytes(addr: int, size: int) -> bytearray:
+    _require_dm()
+    return bytearray(dm.read_bytes(addr, size))
 # --- Writes ---
 def write_u8(addr: int, val: int) -> None:
     _require_dm()
@@ -139,6 +102,7 @@ def write_u32(addr: int, val: int) -> None:
 def write_f32(addr: int, val: float) -> None:
     _require_dm()
     dm.write_f32(addr, val)  # type: ignore[union-attr]
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,76 +134,6 @@ def deref_chain(base_addr: int, *offsets: int) -> Optional[int]:
             return None
         p = nxt
     return p
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# “Symbolic” readers that tolerate missing addresses
-# ──────────────────────────────────────────────────────────────────────────────
-
-def read_f32_sym(key: str, default: float = 0.0) -> float:
-    """
-    Resolve key → address and read f32, warning once if the key is missing.
-    Useful in early NTSC-U work where values aren’t known yet.
-    """
-    addr = resolve_address(key)
-    if addr is None:
-        _warn_once(f"Missing address for key '{key}'")
-        return default
-    try:
-        return read_f32(addr)
-    except Exception:
-        _warn_once(f"Failed f32 read at 0x{addr:08X} for key '{key}'")
-        return default
-
-
-def read_u16_sym(key: str, default: int = 0) -> int:
-    addr = resolve_address(key)
-    if addr is None:
-        _warn_once(f"Missing address for key '{key}'")
-        return default
-    try:
-        return read_u16(addr)
-    except Exception:
-        _warn_once(f"Failed u16 read at 0x{addr:08X} for key '{key}'")
-        return default
-
-
-def read_u32_sym(key: str, default: int = 0) -> int:
-    addr = resolve_address(key)
-    if addr is None:
-        _warn_once(f"Missing address for key '{key}'")
-        return default
-    try:
-        return read_u32(addr)
-    except Exception:
-        _warn_once(f"Failed u32 read at 0x{addr:08X} for key '{key}'")
-        return default
-
-
-def write_u16_sym(key: str, value: int) -> bool:
-    addr = resolve_address(key)
-    if addr is None:
-        _warn_once(f"Missing address for key '{key}' (write skipped)")
-        return False
-    try:
-        write_u16(addr, value)
-        return True
-    except Exception:
-        _warn_once(f"Failed u16 write at 0x{addr:08X} for key '{key}'")
-        return False
-
-
-def write_f32_sym(key: str, value: float) -> bool:
-    addr = resolve_address(key)
-    if addr is None:
-        _warn_once(f"Missing address for key '{key}' (write skipped)")
-        return False
-    try:
-        write_f32(addr, value)
-        return True
-    except Exception:
-        _warn_once(f"Failed f32 write at 0x{addr:08X} for key '{key}'")
-        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────

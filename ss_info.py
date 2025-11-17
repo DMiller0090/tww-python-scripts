@@ -12,11 +12,14 @@ from typing import Optional
 from dolphin import event, gui
 from ww import game, mathutils
 from ww.actors.player import Player
+from ww.context.context import set_region
+from ww.context.detect import detect_region
 
 # --- knobs ---
 DEST_X = -120686.172
 DEST_Z = -308479.062
 
+set_region(detect_region())
 _player = Player()
 _gate = game.FrameGate()
 _pos_by_frame = {} # dict[frame:int] = (x:float,z:float)

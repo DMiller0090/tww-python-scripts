@@ -7,17 +7,18 @@ Global game/engine state helpers (frame counter, parity, simple gating).
 from __future__ import annotations
 from typing import Tuple
 
+from ww.addresses.address import Address
+
 from . import memory as mem
 
 # Symbolic key lives in addresses/<region>.py:
 # FRAME_COUNTER_ADDRESS = 0x803E9D34
 
-def frame(default: int = 0, *, signed: bool = False) -> int:
+def frame() -> int:
     """
-    Read the global frame counter. Use unsigned by default (parity identical).
+    Read the global frame counter.
     """
-    key = "FRAME_COUNTER_ADDRESS"
-    return (mem.read_s32_sym(key, default) if signed else mem.read_u32_sym(key, default))
+    return mem.read_u32(Address.FRAME_COUNTER_ADDRESS)
 
 def parity() -> int:
     """0 for even frames, 1 for odd frames."""

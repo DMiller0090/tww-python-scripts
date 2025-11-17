@@ -4,10 +4,9 @@ from typing import Optional
 from enum import IntEnum
 
 from .. import memory as mem
+from ww.addresses.address import Address
 from ..actor import Actor, proc_id
 from . import register
-
-_OFF_ITEMDROP_TYPE = "ITEMDROP_TYPE_OFFSET"  # Register proc name
 
 _PID = proc_id("PROC_ITEM")
 
@@ -38,7 +37,7 @@ class ItemDrop(Actor):
     @property
     def item_no(self) -> Optional[int]:
         """Raw m_itemNo (u8) or None if offset not available."""
-        off = mem.resolve_address(_OFF_ITEMDROP_TYPE)
+        off = Address.ITEMDROP_TYPE_OFFSET
         if not (self._valid and isinstance(off, int)):
             return None
         try:

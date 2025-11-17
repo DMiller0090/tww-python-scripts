@@ -8,6 +8,8 @@ or rely on ww.memory's resolve_address() which prefers ww.versioning if present.
 
 Nothing needs to be exported here, but we keep this file so the package is explicit.
 """
+from .address import Address
+# Maybe adjust this import to be an instance instead of the class? Would let us use
+# __getattr__ and audit anything missing.
 
-# Having an __all__ is optional; keep it empty to avoid implying a default region.
-__all__ = []
+__all__ = ['Address']

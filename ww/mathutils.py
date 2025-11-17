@@ -15,7 +15,7 @@ from typing import Tuple
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PI  = math.pi
-TAU = 2.0 * math.pi
+TAU = math.tau
 
 DEG_PER_TURN = 360.0
 HW_PER_TURN  = 65536  # halfword units per full turn
