@@ -3,7 +3,7 @@ Thin, typed wrappers over Dolphin's memory API + safe pointer helpers.
 
 Design goals:
 - Keep EVERYTHING side-effect-free and importable outside Dolphin for type-checking.
-- Prefer JP addresses by default, but transparently use `ww.version.detect_region`
+- Prefer JP addresses by default, but transparently use `ww.context.detect.detect_region`
 - Fail “softly” for missing addresses (return 0/0.0) while logging a single warning
   per missing key so single-purpose scripts keep running and we get a TODO list.
 """

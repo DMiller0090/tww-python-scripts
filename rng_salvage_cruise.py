@@ -97,7 +97,6 @@ def _reload_state():
 # ──────────────────────────────────────────────────────────────────────────────
 def _init():
     global startFrame, currX, currY, pullCraneFrame, randDiff
-    global ship,player
     random.seed(int(time.time()))
     savestate.save_to_slot(reloadSaveStateSlot)
     startFrame = game.frame()
@@ -116,7 +115,6 @@ def update():
     global _initialized, waitFrame, saveStateWaitFrame, loadingState, loadStateFrame
     global bestOpenChestFrame, earliestPullCraneFrame, minPullCraneFrame, pullCraneFrameRange
     global currX, currY, currConStickX, currModulo, randDiff, eventStateStart, demo_item_found
-    global ship,player
 
     if not _initialized:
         _init()
