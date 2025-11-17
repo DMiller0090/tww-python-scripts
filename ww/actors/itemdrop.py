@@ -4,6 +4,7 @@ from typing import Optional
 from enum import IntEnum
 
 from .. import memory as mem
+from ww.addresses.address import Address
 from ..actor import Actor, proc_id
 from . import register
 

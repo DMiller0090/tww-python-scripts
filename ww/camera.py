@@ -12,9 +12,9 @@ def cs_angle_halfword(default: int = 0) -> int:
 
     if base_addr is None or off_ptr is None or off_u16 is None:
         # Warn once for any missing piece; return default
-        if base_addr is None: mem._warn_once(f"Missing address for key '{_CSANGLE_BASE}'")
-        if off_ptr   is None: mem._warn_once(f"Missing address for key '{_CSANGLE_OFFPTR}'")
-        if off_u16   is None: mem._warn_once(f"Missing address for key '{_CSANGLE_OFFU16}'")
+        if base_addr is None: mem._warn_once(f"Missing address for Address.CSANGLE_BASE_PTR")
+        if off_ptr   is None: mem._warn_once(f"Missing address for Address.CSANGLE_PTR_OFFSET")
+        if off_u16   is None: mem._warn_once(f"Missing address for Address.CSANGLE_U16_OFFSET")
         return default
 
     # p2 = deref_chain(base, +0x34)

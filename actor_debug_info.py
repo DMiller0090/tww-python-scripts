@@ -6,7 +6,10 @@ from typing import List
 from dolphin import event, gui
 from ww import actor, game, mathutils
 from ww.actors import Player, BokoBaba
+from ww.context.context import set_region
+from ww.context.detect import detect_region
 
+set_region(detect_region())
 _gate = game.FrameGate()
 _player = Player()
 @event.on_frameadvance

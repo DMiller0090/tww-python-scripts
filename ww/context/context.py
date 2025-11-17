@@ -37,7 +37,14 @@ def region(region: GameRegion) -> Generator[WindWakerContext, Any, None]:
     finally:
         ww_context.reset(token)
 
-
+def set_region(r: GameRegion) -> None:
+    """
+    Set region.
+    For example
+    set_region(detect_region())
+    """
+    ww_context.set(r)
+    
 def japan(func):
     """
     Helper Decorator

@@ -19,6 +19,8 @@ from ww.actors import Player
 from ww.actors.ship import Ship      
 from ww import actor as actor_mod
 from ww import camera, game
+from ww.context.context import set_region
+from ww.context.detect import detect_region
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tweakables
@@ -35,6 +37,7 @@ craneBtn              = "X"     # button grappline hook is on
 # ──────────────────────────────────────────────────────────────────────────────
 # State
 # ──────────────────────────────────────────────────────────────────────────────
+set_region(detect_region())
 player = Player()
 ship   = Ship()
 

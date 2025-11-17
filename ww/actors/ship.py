@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from ww.actors import register
+from ww.addresses.address import Address
 
 from .. import memory as mem
 from ..actor import Actor, proc_id
@@ -32,7 +33,7 @@ class Ship(Actor):
         """Return pointer to crane vec3 (x,y,z) or None if unavailable."""
         if not self._valid:
             return None
-        off = Address.OFF_SHIP_CRANE_POS_PTR
+        off = Address.SHIP_CRANE_POS_PTR_OFFSET
         if not isinstance(off, int):
             return None
         try:

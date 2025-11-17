@@ -4,7 +4,7 @@ from typing import Tuple
 from .. import memory as mem
 from ..actor import Actor, proc_id
 from . import register
-from ..addresses import Address
+from ww.addresses.address import Address
 
 
 _PLAYER_PID = proc_id("PROC_PLAYER")  # Register player proc name
