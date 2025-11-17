@@ -11,14 +11,11 @@ Design goals:
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Tuple, Dict, Callable, Any
+from typing import Optional, Tuple, TYPE_CHECKING, Set, AnyStr
 
-# These imports are available when running inside Dolphin’s Python runtime.
-# Outside Dolphin (e.g., static analysis), they can be type-checked via the .pyi stubs.
-try:
+if TYPE_CHECKING:
     from dolphin import memory as dm  # type: ignore
-except Exception:  # pragma: no cover
-    dm = None  # allows offline type checking / docs builds
+
 
 # Default to JP if no versioning module is present.
 try:
@@ -36,7 +33,7 @@ except Exception:  # pragma: no cover
 # Address resolution & “warn once” book-keeping
 # ──────────────────────────────────────────────────────────────────────────────
 
-_MISSING_SEEN: set[str] = set()
+_MISSING_SEEN : Set[str] = set()
 
 def _warn_once(msg: str) -> None:
     if msg not in _MISSING_SEEN:
@@ -61,10 +58,8 @@ def resolve_address(key: str) -> Optional[int]:
     if _ver is not None and hasattr(_ver, "resolve_address"):
         try:
             val = _ver.resolve_address(key)  # type: ignore[attr-defined]
-            if isinstance(val, int):
+            if isinstance(val, int) or val is None:
                 return val
-            if val is None:
-                return None
         except Exception:
             pass
 
@@ -176,6 +171,7 @@ def deref_chain(base_addr: int, *offsets: int) -> Optional[int]:
 # “Symbolic” readers that tolerate missing addresses
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Leaving these in for now, but we should be able to bypass this.
 def read_f32_sym(key: str, default: float = 0.0) -> float:
     """
     Resolve key → address and read f32, warning once if the key is missing.

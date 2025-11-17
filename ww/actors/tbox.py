@@ -5,7 +5,6 @@ from .. import memory as mem
 from ..actor import Actor, proc_id
 from . import register
 
-_OFF_LIGHTING = "TBOX_LIGHTING_OFFSET"
 
 _PID = proc_id("PROC_TBOX")  # Register proc name
 
@@ -19,7 +18,7 @@ class TBox(Actor):
     @property
     def lighting(self) -> Optional[float]:
         """Raw m_itemNo (u8) or None if offset not available."""
-        off = mem.resolve_address(_OFF_LIGHTING)
+        off = Address.TBOX_LIGHTING_OFFSET
         if not (self._valid and isinstance(off, int)):
             return None
         try:
@@ -28,7 +27,7 @@ class TBox(Actor):
             return None
     
     def write_lighting(self, value: float) -> None:
-        off = mem.resolve_address(_OFF_LIGHTING)
+        off = Address.TBOX_LIGHTING_OFFSET
         if not (self._valid and isinstance(off, int)):
             return
         mem.write_f32(self.base + off,value)

@@ -1,0 +1,7 @@
+[project]
+name = "tww-python-scripts"
+version = "0.1.0"
+description = "Repository for TWW Python Scripts"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []

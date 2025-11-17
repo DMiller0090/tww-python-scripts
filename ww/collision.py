@@ -10,9 +10,6 @@ from typing import Optional
 
 from . import memory as mem
 
-# Symbolic keys from addresses/<region>.py
-_ADDR_COLLISION_PTR   = "COLLISION_POINTER"  # u32 pointer to collision struct
-_OFF_COLLISION_FLAGS  = "COLLISION_OFFSET"   # +offset → u16 flags
 
 # Bit positions
 _BIT_ON_FLOOR         = 10
@@ -37,8 +34,8 @@ def _flags_raw(default: int = 0) -> int:
     Read u16 collision flags via: *(u32 at COLLISION_POINTER) + COLLISION_OFFSET.
     Returns `default` (0) if any step is missing/invalid for the active region.
     """
-    ptr_addr = mem.resolve_address(_ADDR_COLLISION_PTR)
-    off      = mem.resolve_address(_OFF_COLLISION_FLAGS)
+    ptr_addr = Address.COLLISION_POINTER
+    off      = Address.COLLISION_OFFSET
 
     if ptr_addr is None or off is None:
         # Region not populated yet; warn once per missing symbol and return default.

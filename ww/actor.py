@@ -26,20 +26,16 @@ from typing import Dict, Iterator, List, Optional, Union, Set, Tuple
 from . import memory as mem
 from . import config, data_path
 from . import mathutils as utils
+from .addresses.address import Address
 
 # ── Address keys & defaults ───────────────────────────────────────────────────
-_K_HEAD = "ACTOR_LIST_HEAD"
-_K_NEXT = "ACTOR_NODE_NEXT_OFFSET"
-_K_GPTR = "ACTOR_NODE_GPTR_OFFSET"
-_K_GPID = "ACTOR_GPROC_ID_OFFSET"
 
 _DEF_NEXT = 0x00
 _DEF_GPTR = 0x0C
 _DEF_GPID = 0x08
 
-def _off(key: str, fallback: int) -> int:
-    v = mem.resolve_address(key)
-    return int(v) if isinstance(v, int) else fallback
+def _off(v: Optional[int], fallback: int) -> int:
+    return v if v is not None else fallback
 
 # ── ProcName/ProcValue table ──────────────────────────────────────────────────
 _NAME_TO_ID: Dict[str, int] = {}
@@ -101,11 +97,6 @@ def proc_name(pid: int, default: str = "?") -> str:
     ensure_proc_table_loaded()
     return _ID_TO_NAME.get(int(pid), default)
 
-# ── Actor object ──────────────────────────────────────────────────────────────
-_OFF_ACTOR_XYZ          = "ACTOR_XYZ_OFFSET"
-_OFF_ACTOR_SPEED        = "ACTOR_SPEED_OFFSET"
-_OFF_ACTOR_ANGLE        = "ACTOR_XYZ_ANGLE_OFFSET"
-_OFF_ACTOR_GRAVITY      = "ACTOR_GRAVITY_OFFSET"
 
 class Actor:
     """
@@ -121,7 +112,7 @@ class Actor:
     @property
     def pid(self) -> Optional[int]:
         """u16 proc id at gptr + ACTOR_GPROC_ID_OFFSET."""
-        id_off = _off(_K_GPID, _DEF_GPID)
+        id_off = _off(Address.ACTOR_GPROC_ID_OFFSET, _DEF_GPID)
         try:
             return int(mem.read_u16(self.base + id_off))
         except Exception:
@@ -134,12 +125,12 @@ class Actor:
 
     # --- position (floats) ---
     def _xyz_base_off(self) -> Optional[int]:
-        off = mem.resolve_address(_OFF_ACTOR_XYZ)
+        off = Address.ACTOR_XYZ_OFFSET
         return int(off) if isinstance(off, int) else None
 
     # --- angle ---
     def _angle_base_off(self) -> Optional[int]:
-        off = mem.resolve_address(_OFF_ACTOR_ANGLE)
+        off = Address.ACTOR_XYZ_ANGLE_OFFSET
         return int(off) if isinstance(off, int) else None
     
     @property
@@ -226,7 +217,7 @@ class Actor:
     # --- speed (float) ---
     @property
     def speed_f(self) -> Optional[float]:
-        off = mem.resolve_address(_OFF_ACTOR_SPEED)
+        off = Address.ACTOR_SPEED_OFFSET
         if not isinstance(off, int):
             return None
         try:
@@ -236,7 +227,7 @@ class Actor:
 
     @property
     def gravity(self) -> Optional[float]:
-        off = mem.resolve_address(_OFF_ACTOR_GRAVITY)
+        off = Address.ACTOR_GRAVITY_OFFSET
         if not isinstance(off, int):
             return None
         try:
@@ -258,7 +249,7 @@ def _is_valid(addr: Optional[int]) -> bool:
         return 0x80000000 <= int(addr) < 0x81800000
 
 def _head_ptr() -> Optional[int]:
-    head_sym = mem.resolve_address(_K_HEAD)
+    head_sym = Address.ACTOR_LIST_HEAD
     if head_sym is None:
         try:
             mem._warn_once(f"Missing address for key '{_K_HEAD}'")
@@ -290,7 +281,7 @@ def iter_actor_nodes(start: Optional[int] = None, *, max_nodes: int = 10000) -> 
         start = _head_ptr()
     if not _is_valid(start):
         return
-    next_off = _off(_K_NEXT, _DEF_NEXT)
+    next_off = _off(Address.ACTOR_NODE_NEXT_OFFSET, _DEF_NEXT)
 
     seen: Set[int] = set()
     node = start
@@ -311,8 +302,8 @@ def iter_actors(
     typed: bool = False,            # <— new
 ) -> Iterator[Actor]:
     want: Optional[int] = proc_id(proc) if isinstance(proc, str) else (proc if proc is None else int(proc))
-    g_off = _off(_K_GPTR, _DEF_GPTR)
-    id_off = _off(_K_GPID, _DEF_GPID)
+    g_off = _off(Address.ACTOR_NODE_GPTR_OFFSET, _DEF_GPTR)
+    id_off = _off(Address.ACTOR_GPROC_ID_OFFSET, _DEF_GPID)
 
     for node in iter_actor_nodes(start=start):
         gptr = _read_u32(node + g_off)
