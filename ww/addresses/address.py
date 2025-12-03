@@ -93,6 +93,7 @@ class Address:
     # GBA offsets
     DISCONNECT_FLAG_OFFSET: int        = RegionalValue(japan=0x641)
     GBA_INPUT_OFFSET: int              = RegionalValue(japan=0x672)#RegionalValue(japan=0x644)#RegionalValue(japan=0x672)
+    GBA_UPLOAD_ACTION_OFFSET: int      = RegionalValue(japan=0x682)
     
     # InputBuffer
     INPUT_BUFFER: int                  = RegionalValue(japan=0x803E4410)

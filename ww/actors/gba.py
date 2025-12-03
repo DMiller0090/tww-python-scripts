@@ -77,3 +77,9 @@ class GBA(Actor):
         # GC alias: map GBA Select to 'Z'
         d["Z"] = d["Select"]
         return d
+
+    def upload_action(self, default: int = -1) -> int:
+        off = Address.GBA_UPLOAD_ACTION_OFFSET
+        if not (self._valid and isinstance(off, int)): return default
+        try: return int(mem.read_u8(self.base + off))
+        except Exception: return default
