@@ -79,6 +79,17 @@ class GBA(Actor):
         return d
 
     def upload_action(self, default: int = -1) -> int:
+        """
+            1 = uploadInitCheck
+            2 = uploadPortCheckWait
+            3 = uploadSelect
+            4 = uploadJoyboot1
+            6 = uploadJoyboot2
+            7 = uploadMessageLoad
+            5 = uploadMessageLoad2
+            8 = uploadConnect
+            10 = uploadMessageSend
+        """
         off = Address.GBA_UPLOAD_ACTION_OFFSET
         if not (self._valid and isinstance(off, int)): return default
         try: return int(mem.read_u8(self.base + off))
