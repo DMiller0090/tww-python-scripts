@@ -25,4 +25,5 @@ from .bokobaba import BokoBaba
 from .itemdrop import ItemDrop
 from .tbox import TBox
 from .ship import Ship
-__all__ = ["register", "wrapper_for_pid", "Player", "Ship", "DarkNut", "BokoBaba", "ItemDrop", "TBox"]
+from .gba import GBA
+__all__ = ["register", "wrapper_for_pid", "Player", "Ship", "DarkNut", "BokoBaba", "ItemDrop", "TBox", "GBA"]

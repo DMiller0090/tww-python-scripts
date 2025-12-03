@@ -12,6 +12,9 @@ from __future__ import annotations
 import math
 from typing import Tuple
 
+from ww import memory
+from ww.addresses.address import Address
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PI  = math.pi
@@ -92,12 +95,21 @@ def angle2d_hw(x1: float, z1: float, x2: float, z2: float) -> int:
     """
     return deg_to_halfword(angle2d_deg(x1, z1, x2, z2))
 
-def project2d(x: float, z: float, angle_deg: float, dist: float) -> Tuple[float, float]:
+def project2d(x: float, z: float, angle_deg: float, dist: float, lookup: bool = False) -> Tuple[float, float]:
     """
     Move (x,z) forward by `dist` along `angle_deg`.
     """
+    print(angle_deg)
     rad = math.radians(wrap_deg(angle_deg))
-    return (x + math.cos(rad) * dist, z + math.sin(rad) * dist)
+    new_x = 0
+    new_z = 0
+    if lookup:  
+        new_x = x + (dist * sin_lookup(rad))
+        new_z = z + (dist * cos_lookup(rad))
+    else:
+        new_x = x + (dist * math.sin(rad))
+        new_z = z + (dist * math.cos(rad))
+    return (new_x, new_z)
 
 
 # ── Degree offsets pipeline helpers (for 45°/arrow-swim) ──────────
@@ -135,3 +147,105 @@ def to_uint8(n: float) -> int:
     """
     n = clamp(round(n), 0, 255)
     return int(n)
+
+def to_s16(x: int) -> int:
+        return ((x + 0x8000) & 0xFFFF) - 0x8000  # signed 16-bit
+    
+def cos_lookup(value: float) -> float:
+    value = nfmod(value, 6.283185482025146)
+    index: int = int(value * 10430.3779296875)
+    if index < -32768:
+        index += 65536
+    else:
+        if 32767 < index:
+            index += -65536
+    index = index >> 4
+    if index == 0:
+        return 1
+    if index > 4096:
+        return math.nan
+    if index < 0:
+        index = 4096 + index
+    off: int = index * 4
+    
+    cos_ptr: int = memory.read_u32(Address.COS_TABLE_PTR)
+    addr: int = cos_ptr + off
+    return memory.read_f32(addr)
+
+def sin_lookup(value: float) -> float:
+    # Normalize to [0, 2π) using the same constant your cos function uses
+    value = nfmod(value, 6.283185482025146)
+
+    # Convert radians → table index space (65536 / 2π ≈ 10430.3779)
+    index: int = int(value * 10430.3779296875)
+
+    # Wrap to signed 16-bit range like the original
+    if index < -32768:
+        index += 65536
+    elif index > 32767:
+        index -= 65536
+
+    # The table uses 12-bit indices (divide by 16)
+    index = index >> 4
+
+    # Fast path & bounds (mirror your cos logic)
+    if index == 0:
+        return 0.0
+    if index > 4096:
+        return math.nan
+    if index < 0:
+        index = 4096 + index
+
+    off: int = index * 4
+    sin_ptr: int = memory.read_u32(Address.SIN_TABLE_PTR)
+    addr: int = sin_ptr + off
+    return memory.read_f32(addr)
+
+def cLib_addCalcAngleS(value: int, target: int, scale: int, max_step: int, min_step: int, *, wrap16: bool = True) -> int:
+    """
+    Adds angle at a determined rate. 
+    Based on decomp:
+    https://github.com/zeldaret/tww/blob/c1d05201b6ace320f48727676eb3c09aa150798b/src/SSystem/SComponent/c_lib.cpp#L160
+    """
+    # Optionally coerce inputs to s16 first (to match C parameter types)
+    if wrap16:
+        value  = to_s16(value)
+        target = to_s16(target)
+
+    def diff_of(a: int, b: int) -> int:
+        d = b - a
+        return to_s16(d) if wrap16 else d
+
+    diff = diff_of(value, target)
+
+    if value != target:
+        # step = (diff / scale) with C-like truncation toward zero
+        if scale == 0:
+            step = diff
+        else:
+            step = int(diff / scale)
+
+        if step > min_step or step < -min_step:
+            if step > max_step:
+                step = max_step
+            if step < -max_step:
+                step = -max_step
+            value = value + step
+        else:
+            if diff >= 0:
+                value = value + min_step
+                diff = diff_of(value, target)
+                if diff <= 0:
+                    value = target
+            else:
+                value = value - min_step
+                diff = diff_of(value, target)
+                if diff >= 0:
+                    value = target
+
+    if wrap16:
+        value = to_s16(value)
+
+    remaining = diff_of(value, target)  # returns (target - value) with same s16 policy
+    # The C function returns (target - *pValue), so `remaining` matches that.
+    return value, remaining

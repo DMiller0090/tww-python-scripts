@@ -15,6 +15,9 @@ class Address:
     Y_ADDRESS: int                 = RegionalValue(japan=0x803D7900)
     Z_ADDRESS: int                 = RegionalValue(japan=0x803D7904)
 
+    # Math
+    SIN_TABLE_PTR: int             = RegionalValue(japan=0x803eae28)
+    COS_TABLE_PTR: int             = RegionalValue(japan=0x803eae2C)
     # In-game “actual speed” (pointer + offset pattern used historically)
     ACTUAL_SPEED_POINTER: int  = RegionalValue(japan=0x803B02E4)
     ACTUAL_SPEED_ADDRESS_OFFSET: int    = RegionalValue(japan=0x00000444)  # +0x444 from the dereferenced base
@@ -30,6 +33,12 @@ class Address:
     # Link’s state field (relative to Link base)
     PLAYER_STATE: int                    = RegionalValue(japan=0x000031D8)
 
+    # Player position fields
+    PLAYER_TARGET_FACING_OFFSET: int     = RegionalValue(japan=0x00034E8)
+    
+    # Player stick info
+    STICK_DISTANCE_OFFSET: int          = RegionalValue(japan=0x000035B4) # offset from player pointer
+    
     # Equipent
     EQUIPPED_ITEM_Y: int                = RegionalValue(japan=0x803BDCD0)
     BOMB_COUNT: int                     = RegionalValue(japan=0x803B8172)
@@ -38,7 +47,7 @@ class Address:
     MAIN_STICK_X: int                   = RegionalValue(japan=0x803E4412)  # int8
     MAIN_STICK_Y: int                   = RegionalValue(japan=0x803E4413)  # int8
     CONTROLLER_INPUT: int               = RegionalValue(japan=0x803E0D2A)  # u16 buttons bitfield
-
+    MAIN_STICK_ANGLE: int               = RegionalValue(japan=0x80398314)
     # Camera/CS angle pointer chain
     CSANGLE_BASE_PTR: int       = RegionalValue(japan=0x803AD380)  # u32 *
     CSANGLE_PTR_OFFSET: int     = RegionalValue(japan=0x00000034)  # +0x34, u32 *
@@ -80,3 +89,10 @@ class Address:
     SHIP_POINTER: int                  = RegionalValue(japan=0x803BDC50)
     SHIP_CRANE_POS_PTR_OFFSET: int     = RegionalValue(japan=0x434)
     SHIP_MODE_OFFSET: int              = RegionalValue(japan=0x34D)
+    
+    # GBA offsets
+    DISCONNECT_FLAG_OFFSET: int        = RegionalValue(japan=0x641)
+    GBA_INPUT_OFFSET: int              = RegionalValue(japan=0x672)#RegionalValue(japan=0x644)#RegionalValue(japan=0x672)
+    
+    # InputBuffer
+    INPUT_BUFFER: int                  = RegionalValue(japan=0x803E4410)

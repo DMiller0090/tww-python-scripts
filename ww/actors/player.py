@@ -49,6 +49,11 @@ class Player(Actor):
     def debug_pos3d(self) -> Tuple[float, float, float]:
         return (self.debug_x(), self.debug_y(), self.debug_z())
 
+    def target_facing(self, default: int = 0) -> int:
+        off = Address.PLAYER_TARGET_FACING_OFFSET
+        try: return int(mem.read_s16(self.base + off))
+        except Exception: return default
+        
     # ---- state / animation (relative to gptr) ----
     def state(self, default: int = 0) -> int:
         off = Address.PLAYER_STATE
@@ -96,4 +101,16 @@ class Player(Actor):
         a = Address.BOMB_COUNT
         if a is None: return default
         try: return int(mem.read_u8(a))
+        except Exception: return default
+
+    # player used stick distance
+    def stick_distance(self, default: float = 0.0) -> float:
+        off = Address.STICK_DISTANCE_OFFSET
+        try: return float(mem.read_f32(self.base + off))
+        except Exception: return default
+    
+    def stick_angle(self, default: int = 0) -> int:
+        a = Address.MAIN_STICK_ANGLE
+        if a is None: return default
+        try: return int(mem.read_u16(a))
         except Exception: return default
