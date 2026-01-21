@@ -131,6 +131,46 @@ def apply_angle_offsets_deg(
     deg += static_offset_deg
     return wrap_deg(deg)
 
+def closest_point_on_segment(
+    x: float, y: float,
+    x1: float, y1: float,
+    x2: float, y2: float
+) -> Tuple[float, float, float, float]:
+    """
+    Returns (cx, cy, t, dist) where:
+      - (cx, cy) is the closest point on segment (x1,y1)->(x2,y2) to point (x,y)
+      - t is the clamped parameter in [0,1] (0=A, 1=B)
+      - dist is the Euclidean distance from (x,y) to (cx,cy)
+    """
+    ax, ay = x1, y1
+    bx, by = x2, y2
+    px, py = x, y
+
+    abx, aby = bx - ax, by - ay
+    apx, apy = px - ax, py - ay
+
+    ab_len2 = abx * abx + aby * aby
+    if ab_len2 == 0.0:
+        # Segment is a point
+        cx, cy = ax, ay
+        dx, dy = px - cx, py - cy
+        return cx, cy, 0.0, math.hypot(dx, dy)
+
+    # Project AP onto AB, get parameter t along the infinite line
+    t = (apx * abx + apy * aby) / ab_len2
+
+    # Clamp t to the segment [0,1]
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+
+    # Closest point on the segment
+    cx = ax + t * abx
+    cy = ay + t * aby
+
+    dx, dy = px - cx, py - cy
+    return cx, cy, t, math.hypot(dx, dy)
 
 # ── Utility: safe integer coercions for controller ranges ─────────────────────
 

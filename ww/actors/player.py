@@ -114,3 +114,14 @@ class Player(Actor):
         if a is None: return default
         try: return int(mem.read_u16(a))
         except Exception: return default
+        
+    # wind waker
+    def ww_beat_frame(self,default: float = 0.0) -> float:
+        off = Address.CURRENT_BEAT_FRAME_OFFSET
+        try: return float(mem.read_f32(self.base + off))
+        except Exception: return default
+    
+    def ww_curr_beat(self, default: int = 0) -> int:
+        off = Address.CURRENT_BEAT_OFFSET
+        try: return int(mem.read_u32(self.base + off))
+        except Exception: return default

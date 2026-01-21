@@ -21,7 +21,7 @@ Optional (for Actor accessors):
 from __future__ import annotations
 
 import csv
-from typing import Dict, Iterator, List, Optional, Union, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Type, Union, Set, Tuple
 
 from . import memory as mem
 from . import config, data_path
@@ -314,6 +314,8 @@ def iter_actors(
             continue
         yield _wrap_with_registered(gptr, pid) if typed else Actor(gptr)
 
+def get_actors_by_type(obj: Type[Actor]) -> List[Actor]:
+    return list(filter(lambda a: isinstance(a, obj), iter_actors(typed=True)))
 
 def get_actors_by_proc(proc: Union[str, int], *, typed: bool = False) -> List[Actor]:
     return list(iter_actors(proc, typed=typed))

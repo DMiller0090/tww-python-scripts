@@ -43,6 +43,10 @@ class Address:
     EQUIPPED_ITEM_Y: int                = RegionalValue(japan=0x803BDCD0)
     BOMB_COUNT: int                     = RegionalValue(japan=0x803B8172)
 
+    # Wind waker
+    CURRENT_BEAT_FRAME_OFFSET: int       = RegionalValue(japan=0x303C) # f32
+    CURRENT_BEAT_OFFSET: int             = RegionalValue(japan=0x34D8) # u32
+    
     # Controller inputs (raw, absolute)
     MAIN_STICK_X: int                   = RegionalValue(japan=0x803E4412)  # int8
     MAIN_STICK_Y: int                   = RegionalValue(japan=0x803E4413)  # int8
@@ -95,5 +99,15 @@ class Address:
     GBA_INPUT_OFFSET: int              = RegionalValue(japan=0x672)#RegionalValue(japan=0x644)#RegionalValue(japan=0x672)
     GBA_UPLOAD_ACTION_OFFSET: int      = RegionalValue(japan=0x682)
     
+    # Keese offsets
+    KEESE_ACTION_OFFSET                = RegionalValue(japan=0x2D1) # u8
+    KEESE_BEHAVIOR_OFFSET              = RegionalValue(japan=0x2D3) # u8
+    KEESE_POS_MOVE_OFFSET              = RegionalValue(japan=0x2E8) # cXyz
+    KEESE_CHK_PLYR_DIST_OFFSET         = RegionalValue(japan=0x30C) # u16
+    KEESE_RND_UPDATE_POS_OFFSET        = RegionalValue(japan=0x30E) # u16
+    KEESE_ACTION_TIMER_OFFSET          = RegionalValue(japan=0x310) # u16
+    
+    # ChuChu offsets
+    CHU_ACTION_OFFSET                  = RegionalValue(japan=0x2F5) # u8
     # InputBuffer
     INPUT_BUFFER: int                  = RegionalValue(japan=0x803E4410)
