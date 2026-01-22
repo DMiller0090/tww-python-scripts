@@ -12,10 +12,14 @@ from ww.context.context import set_region
 from ww.context.detect import detect_region
 
 # --- knobs ---
-DEST_X = -120686.172
-DEST_Z = -308479.062
-ARROW_SWIM_DEG = 0      # angle to arrow swim at (keep at 0 for most use cases)
-OFFSET_DEG = 0          # offset to swim at, for arrow swims, this should be 90 to swim towards destination
+#Top of pillar
+# DEST_X = 296177.25
+# DEST_Z = 96816.1172
+
+DEST_X = 202126.766
+DEST_Z = -185459.266
+ARROW_SWIM_DEG = 5.7  # angle to arrow swim at (keep at 0 for most use cases)
+OFFSET_DEG = 90          # offset to swim at, for arrow swims, this should be 90 to swim towards destination
 START_FACING_DEST = True # set this to True if starting swim facing destination
 
 set_region(detect_region())

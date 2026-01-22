@@ -224,7 +224,48 @@ class Actor:
             return float(mem.read_f32(self.base + int(off)))
         except Exception:
             return None
-
+    @property
+    def speed_x(self) -> Optional[float]:
+        off = Address.ACTOR_XYZ_SPEED_OFFSET
+        if not isinstance(off, int):
+            return None
+        try:
+            return float(mem.read_f32(self.base + int(off)))
+        except Exception:
+            return None
+        
+    @property
+    def speed_y(self) -> Optional[float]:
+        off = Address.ACTOR_XYZ_SPEED_OFFSET
+        if not isinstance(off, int):
+            return None
+        try:
+            return float(mem.read_f32(self.base + int(off) + 4))
+        except Exception:
+            return None
+        
+    @property
+    def speed_z(self) -> Optional[float]:
+        off = Address.ACTOR_XYZ_SPEED_OFFSET
+        if not isinstance(off, int):
+            return None
+        try:
+            return float(mem.read_f32(self.base + int(off) + 8))
+        except Exception:
+            return None
+        
+    def speed3d(self) -> Optional[Tuple[float, float, float]]:
+        x, y, z = self.speed_x, self.speed_y, self.speed_z
+        if x is None or y is None or z is None:
+            return None
+        return (x, y, z)
+    
+    def speed2d(self) -> Optional[Tuple[float, float]]:
+        x, z = self.speed_x, self.speed_z
+        if x is None or z is None:
+            return None
+        return (x, z)
+    
     @property
     def gravity(self) -> Optional[float]:
         off = Address.ACTOR_GRAVITY_OFFSET

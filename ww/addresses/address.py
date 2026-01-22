@@ -79,6 +79,7 @@ class Address:
 
     # Actor offsets
     ACTOR_XYZ_OFFSET: int        = RegionalValue(japan=0x1F8)
+    ACTOR_XYZ_SPEED_OFFSET: int  = RegionalValue(japan=0x220)
     ACTOR_SPEED_OFFSET: int      = RegionalValue(japan=0x254)
     ACTOR_XYZ_ANGLE_OFFSET: int  = RegionalValue(japan=0x20C)
     ACTOR_GRAVITY_OFFSET: int    = RegionalValue(japan=0x600)
