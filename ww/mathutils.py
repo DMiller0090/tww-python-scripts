@@ -86,8 +86,9 @@ def dist2d(x1: float, z1: float, x2: float, z2: float) -> float:
 def angle2d_deg(x1: float, z1: float, x2: float, z2: float) -> float:
     """
     World-space angle from (x1,z1) to (x2,z2), in degrees [0,360).
+    WW convention: 0=South (+Z), 90=East (+X), 180=North (-Z), 270=West (-X).
     """
-    return wrap_deg(math.degrees(math.atan2(z2 - z1, x2 - x1)))
+    return wrap_deg(math.degrees(math.atan2(x2 - x1, z2 - z1)))
 
 def angle2d_hw(x1: float, z1: float, x2: float, z2: float) -> int:
     """
@@ -97,19 +98,12 @@ def angle2d_hw(x1: float, z1: float, x2: float, z2: float) -> int:
 
 def project2d(x: float, z: float, angle_deg: float, dist: float, lookup: bool = False) -> Tuple[float, float]:
     """
-    Move (x,z) forward by `dist` along `angle_deg`.
+    Move (x,z) forward by `dist` along `angle_deg` (WW convention: 0=South, 90=East).
     """
-    print(angle_deg)
     rad = math.radians(wrap_deg(angle_deg))
-    new_x = 0
-    new_z = 0
-    if lookup:  
-        new_x = x + (dist * sin_lookup(rad))
-        new_z = z + (dist * cos_lookup(rad))
-    else:
-        new_x = x + (dist * math.sin(rad))
-        new_z = z + (dist * math.cos(rad))
-    return (new_x, new_z)
+    if lookup:
+        return x + dist * sin_lookup(rad), z + dist * cos_lookup(rad)
+    return x + dist * math.sin(rad), z + dist * math.cos(rad)
 
 
 # ── Degree offsets pipeline helpers (for 45°/arrow-swim) ──────────

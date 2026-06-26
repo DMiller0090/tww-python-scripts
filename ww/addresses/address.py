@@ -110,5 +110,8 @@ class Address:
     
     # ChuChu offsets
     CHU_ACTION_OFFSET                  = RegionalValue(japan=0x2F5) # u8
+    # Stage
+    CURRENT_STAGE: int                 = RegionalValue(japan=0x803BD23C)  # fixed 11-char ASCII string
+
     # InputBuffer
     INPUT_BUFFER: int                  = RegionalValue(japan=0x803E4410)

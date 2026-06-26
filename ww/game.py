@@ -121,6 +121,11 @@ def gc_csv_row(i: int = 0) -> List[int | bool]:
 # Symbolic key lives in addresses/<region>.py:
 # FRAME_COUNTER_ADDRESS = 0x803E9D34
 
+def current_stage() -> str:
+    """Read the current stage name (fixed 11-byte ASCII at CURRENT_STAGE, JP)."""
+    raw = mem.read_bytes(Address.CURRENT_STAGE, 11)
+    return raw.split(b'\x00')[0].decode('ascii', errors='replace')
+
 def frame() -> int:
     """
     Read the global frame counter.
