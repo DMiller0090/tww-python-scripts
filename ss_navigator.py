@@ -8,18 +8,47 @@ facing, and projects the expected superswim path toward a clicked destination.
 from __future__ import annotations
 import math
 import os
+import sys
 from typing import Optional, Tuple
-from dolphin import event, gui
-from ww import mathutils
+from dolphin import event, gui, controller, memory
+from ww import mathutils, game
 from ww.actors.player import Player
+from ww.mathutils import deg_to_halfword, wrap_deg
 from ww.context.context import set_region
 from ww.context.detect import detect_region
 from ww.game import current_stage
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # so `import cam_sync` resolves
+import cam_sync
 
 # ── configuration ───────────────────────────────────────────────────
 PROJECTION_MAX_STEPS    = 4000   # safety cap; actual length tracks distance-to-dest
 PROJECTION_BUFFER_STEPS = 6      # extra steps carried straight through the destination
 SS_SPEED                = 7000.0
+
+# ── charge config (merged from ss_charge_destination / ss_charge_facing_dir) ──
+# Two armed modes steer the superswim charge straight off the clicked destination, both
+# de-rotated through cam_sync so they hold their world axis while the camera spins:
+#   arrow-swim (default) = ss_charge_destination: reorient onto the axis PERPENDICULAR to
+#       the Link->dest bearing (so the perpendicular arrow drift heads toward the dest),
+#       then alternate across that axis with instant-turnaround snaps.
+#   straight-axis        = ss_charge_facing_dir: 180-flip charge along the live Link->dest
+#       bearing (a fixed-axis primitive that re-aims at the dest as Link moves).
+OFFSET_DEG        = 90    # 90 = charge axis perpendicular to the dest bearing (arrow-swim toward it)
+ARROW_SWIM_DEG    = 0     # drift tilt toward the dest (0 = pure charge, no drift)
+CAM_PREDICT_STEPS = 1     # 1 = predict next-frame csangle; 0 reproduces the old stale read
+FACING_ADDR       = 0x803EA3D2   # shape_angle.y (u16) -- the facing the reorient snap operates on
+_ARROW_HW         = int(round(ARROW_SWIM_DEG * 65536 / 360.0))
+
+# Minimum turn (deg) to accept a turnaround as a DIRECT charge snap; below it we reorient.
+# The hard game boundary is 135° (DIR_BACKWARD); sitting a degree under keeps near-180°
+# alternations that drift a hair from needlessly dropping into a reorient (more failure-
+# prone). Raise toward 135 for stricter snaps, lower to reorient even less.
+TURNAROUND_SNAP_DEG = 134.0
+_TURNAROUND_SNAP_HW = int(round(TURNAROUND_SNAP_DEG * 65536 / 360.0))
+
+if not cam_sync.loaded:
+    print("[ss_navigator] cam_sync tables not loaded: %s" % cam_sync.load_error)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAP_PATH = os.path.join(_SCRIPT_DIR, "assets", "great_sea_chart.png").replace("\\", "/")
@@ -49,6 +78,8 @@ C_TRAVEL = 0xFFFFFF00
 C_PROJ   = 0xFF00AAFF
 C_FG     = 0xFFEEEEEE
 C_DIM    = 0xFF777777
+C_SWIM   = 0xFF38E08A   # charging pulse (green) — sonar ping around Link + status pill
+C_REORI  = 0xFFFFB638   # reorienting pulse (amber)
 # decorative frame around the chart
 C_SEA      = 0xFF12203A   # deep-sea backdrop behind/around the map
 C_SEA_DK   = 0xFF0A1424   # darker vignette toward the edges
@@ -214,6 +245,20 @@ QLineEdit {
     padding: 5px 7px; color: #e6e6f0; selection-background-color: #00aaff;
 }
 QLineEdit:focus { border-color: #00aaff; }
+
+/* bipolar arrow-swim tilt slider: red (−, port) → neutral center → green (+, starboard) */
+QSlider::groove:horizontal {
+    height: 8px; border-radius: 4px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #ff4d4d, stop:0.46 #2a2a40, stop:0.5 #6b6b85,
+        stop:0.54 #2a2a40, stop:1 #36d97a);
+}
+QSlider::handle:horizontal {
+    width: 14px; margin: -6px 0; border-radius: 7px;
+    background: #ffd95a; border: 2px solid #ffffff;
+}
+QSlider::handle:horizontal:hover  { background: #fff0a8; }
+QSlider::handle:horizontal:pressed { background: #ffe070; border-color: #00aaff; }
 """
 set_region(detect_region())
 _player: Optional[Player] = None
@@ -227,6 +272,27 @@ _status = _panel.text("Click the map to set a destination")
 # --- primary actions ---
 _btn_here = _panel.button("Set destination to Link's position")
 _chk_proj = _panel.checkbox("Show projection", checked=True)
+
+# --- superswim charge (drives the controller toward the selected destination) ---
+# One checkbox per mode; they're kept mutually exclusive in update() (checking one
+# clears the other). Both unchecked = disarmed.
+_chk_dest  = _panel.checkbox("Swim to destination")
+_chk_angle = _panel.checkbox("Swim at current angle")
+# Arrow-swim drift tilt (deg), biases the perpendicular drift to one side of the
+# straight path. Bipolar and centered at 0: − (red, port/left) ◀ … ▶ + (green,
+# starboard/right). Live; only affects "Swim to destination". ±45 keeps the
+# alternating snap comfortably past the 135° turnaround threshold.
+# The tilted turnaround angle is (180° − tilt), so the snap only holds while
+# tilt < 180 − TURNAROUND_SNAP_DEG. Cap the slider at exactly that budget so the modifier
+# can never push a turnaround past the snap threshold (at the extreme the CHARGE* fallback
+# still preserves the snap untilted). Tracks TURNAROUND_SNAP_DEG automatically.
+ARROW_TILT_MAX = 180.0 - TURNAROUND_SNAP_DEG
+# Label flanks the bar with − / + (the caption renders directly above the slider). The
+# centered start relies on the ScriptWindowManager SliderFloat patch honoring .value.
+_sld_arrow = _panel.slider_float("−        Arrow swim modifier        +",
+                                 -ARROW_TILT_MAX, ARROW_TILT_MAX)
+_sld_arrow.value = 0.0          # start centered (no drift bias)
+_txt_arrow = _panel.text("Modifier:  0.0°")
 
 # --- calibration (collapsible) ---
 _chk_cal  = _panel.checkbox("Show grid calibration", checked=False)
@@ -271,7 +337,127 @@ _facing_hw: Optional[int] = None
 _have_state: bool = False
 _current_stage: str = ""
 
+# Charge control. _armed / _angle_mode / _ARROW_HW are written on the host thread (the
+# UI in update()) and read on the emu thread (_run_charge() in _read_state()), mirroring
+# the _dest_* pattern; plain Python globals under the GIL, no cross-interpreter bridge.
+#   _angle_mode False = "Swim to destination" (arrow-swim toward the clicked dest)
+#   _angle_mode True  = "Swim at current angle" (hold Link's facing at arm time)
+_armed: bool = False
+_angle_mode: bool = False
+_dest_prev: bool = False      # last-frame checkbox states, for the mutual-exclusion edge check
+_angle_prev: bool = False
+_chg_active: bool = False    # charging this frame (latch identity tracked by _chg_key)
+_chg_key = None             # plan identity -- recapture the held facing when this changes
+_chg_goal: int = 0          # angle mode: Link's facing captured at arm time (the fixed axis)
+_chg_expected: int = 0      # MODEL facing: where the last snap put Link. Drives the alternation
+                            # instead of laggy live facing (the snap manifests 1 game frame late).
+_chg_last_frame = None      # game frame of the last plan advance (gate; None = advance now)
+_chg_target: int = 0        # current commanded world facing target (also HUD)
+_chg_phase: str = ""        # HUD: current charge phase
+_anim: int = 0              # host-side frame tick for canvas animation (swim ping / pill blink)
+
 SEA_STAGE = "sea"
+
+
+def _set_main(sx: float, sy: float) -> None:
+    inp = controller.get_gc_buttons(0)
+    inp["StickX"] = max(0, min(int(sx), 255))
+    inp["StickY"] = max(0, min(int(sy), 255))
+    controller.set_gc_buttons(0, inp)
+
+
+def _reset_charge() -> None:
+    global _chg_active
+    _chg_active = False
+
+
+def _run_charge(cur_x: float, cur_z: float) -> None:
+    """Drive the main stick to charge the superswim, validating every turnaround.
+
+    Emu-thread only (memory + controller live here). The PLAN advances once per GAME frame
+    (game.frame() @ 0x803E9D34), re-issuing the held target on the other VI callbacks --
+    on_frameadvance fires per VI frame (60 Hz) while game logic / the snap run at 30 Hz, so
+    advancing the plan per-callback would burn two flips per game frame and the snap never
+    fires (the original open-loop bug). The stick itself is re-issued every callback so it
+    de-rotates against the live camera (set_gc_buttons auto-clears).
+
+    Facing is MODELED (_chg_expected = where the last snap put Link), not read live: the
+    instant-turnaround snaps shape_angle exactly onto the commanded charge each game frame
+    but manifests in RAM a frame late, so live facing lags and breaks the alternation.
+    Seeded once from the real facing at arm time; thereafter it equals the last command.
+
+    Each game frame: pick the charge axis, take the end FARTHER from the modeled facing as
+    the turnaround target (auto-alternates 180°), and check it's inside the instant-snap
+    window -- |angdiff(target, facing)| > 135° (0x6000), the DIR_BACKWARD cone from the
+    decomp. If yes, snap it (clean charge). If NOT (the axis rotated near-perpendicular to
+    facing, or the arrow tilt pushed the target under the 45° budget) a single snap can't
+    reach it, so plan a chain of valid >135° snaps onto the axis with reorient_targets and
+    take step 1 -- re-planned each frame, exactly the start-of-script reorient, now applied
+    continuously to any turnaround that falls outside the window.
+    """
+    global _chg_active, _chg_key, _chg_goal, _chg_expected, _chg_last_frame
+    global _chg_target, _chg_phase
+
+    if not cam_sync.loaded:
+        return
+
+    inp = controller.get_gc_buttons(0)
+    csx, csy = int(inp.get("CStickX", 128)), int(inp.get("CStickY", 128))
+    arrow_on = _ARROW_HW != 0
+
+    # (Re)arm: seed the modeled facing from the real facing once, and force a plan advance
+    # this callback. Angle mode also captures that facing as its fixed axis.
+    key = ("angle",) if _angle_mode else ("dest",)
+    if (not _chg_active) or key != _chg_key:
+        _chg_key = key
+        _chg_active = True
+        _chg_expected = memory.read_u16(FACING_ADDR) & 0xFFFF
+        if _angle_mode:
+            _chg_goal = _chg_expected
+        _chg_last_frame = None
+
+    # Advance the plan once per game frame; otherwise hold the last command.
+    frame = game.frame()
+    if _chg_last_frame is None or frame != _chg_last_frame:
+        _chg_last_frame = frame
+
+        # Charge axis. Dest mode: the OFFSET_DEG (90°) perpendicular arrow-swim axis applies
+        # only when a tilt is dialed in; at 0 the axis is the dest bearing itself (straight
+        # charge toward the dest, matching the projection). Angle mode: the captured facing.
+        if _angle_mode:
+            axis = _chg_goal
+            dest_bearing = _chg_goal           # no drift in angle mode; placeholder
+        else:
+            dest_bearing = deg_to_halfword(
+                wrap_deg(math.degrees(math.atan2(_dest_x - cur_x, _dest_z - cur_z)))) & 0xFFFF
+            offset = (deg_to_halfword(OFFSET_DEG) & 0xFFFF) if arrow_on else 0
+            axis = (dest_bearing + offset) & 0xFFFF
+        e0, e1 = axis, (axis + 0x8000) & 0xFFFF
+
+        # Turnaround target = axis end FARTHER from the modeled facing (the big-angle snap;
+        # after snapping to one end the other becomes the far one -> auto 180° alternation).
+        # Arrow tilt biases facing AWAY from the dest so the ⊥ drift heads toward it.
+        far = e0 if abs(cam_sync.angdiff_hw(_chg_expected, e0)) > abs(cam_sync.angdiff_hw(_chg_expected, e1)) else e1
+        drift = 0 if _angle_mode else (-_ARROW_HW if cam_sync.angdiff_hw(dest_bearing, far) >= 0 else _ARROW_HW)
+        want = (far + drift) & 0xFFFF
+
+        if abs(cam_sync.angdiff_hw(want, _chg_expected)) > _TURNAROUND_SNAP_HW:
+            _chg_target, _chg_phase = want, "CHARGE"
+        else:
+            # Outside the snap window -> plan a snap chain onto the axis, take step 1.
+            chain = cam_sync.reorient_targets(_chg_expected, axis)
+            if chain:
+                _chg_target, _chg_phase = chain[0], "REORIENT %d" % len(chain)
+            else:
+                # On-axis but the tilt pushed `want` under the 45° budget: snap the far end
+                # untilted this frame to keep charging (drops the drift bias, not the snap).
+                _chg_target, _chg_phase = far, "CHARGE*"
+
+        _chg_expected = _chg_target            # the snap lands here by the next game frame
+
+    # Every callback: de-rotate the held target for the live camera and issue it.
+    (msx, msy), _pred = cam_sync.charge_stick(_chg_target, csx, csy, CAM_PREDICT_STEPS)
+    _set_main(msx, msy)
 
 # ── memory read (emu thread only) ───────────────────────────────────
 @event.on_frameadvance
@@ -293,6 +479,7 @@ def _read_state() -> None:
         _player = None
     if _player is None:
         _have_state = False
+        _reset_charge()   # drop the plan so it re-latches fresh once Link is valid again
         return
 
     try:
@@ -303,16 +490,53 @@ def _read_state() -> None:
     except Exception:
         _have_state = False
 
+    # Drive the superswim charge here on the emu thread (memory + controller must live on
+    # the emu thread, same as the standalone ss_charge_* scripts did via on_frameadvance).
+    # Arrow-swim needs a destination; "swim at current angle" only needs Link on the sea.
+    on_sea = _current_stage == SEA_STAGE
+    if _have_state and _armed and on_sea and (_angle_mode or _dest_set):
+        try:
+            _run_charge(_cur_x, _cur_z)
+        except Exception:
+            _reset_charge()
+    else:
+        _reset_charge()
+
 # ── input + draw (host thread; safe while paused) ───────────────────
 @event.on_hostupdate
 def update() -> None:
     global _dest_x, _dest_z, _dest_set, _cal_shown
+    global _armed, _angle_mode, _dest_prev, _angle_prev, _ARROW_HW, _anim
 
+    _anim += 1
     cur_x = _cur_x
     cur_z = _cur_z
     facing_hw: Optional[int] = _facing_hw
     on_sea = _current_stage == SEA_STAGE
     have = _have_state
+
+    # Mutual exclusion: the two mode checkboxes can't both be on. If both read checked,
+    # the one just turned on this frame (its prev state was off) wins; force the other
+    # off in the widget too so the UI reflects it. Host thread owns the widgets.
+    dest_chk, angle_chk = _chk_dest.checked, _chk_angle.checked
+    if dest_chk and angle_chk:
+        if not _dest_prev:           # "swim to destination" was just checked -> it wins
+            angle_chk = False
+            _chk_angle.checked = False
+        else:                        # "swim at current angle" was just checked -> it wins
+            dest_chk = False
+            _chk_dest.checked = False
+    _dest_prev, _angle_prev = dest_chk, angle_chk
+
+    # Latch UI state for the emu-thread charge to read.
+    _armed = dest_chk or angle_chk
+    _angle_mode = angle_chk
+
+    # Live arrow-swim modifier from the slider (deg -> halfword), with a signed readout.
+    tilt_deg = _sld_arrow.value
+    _ARROW_HW = int(round(tilt_deg * 65536 / 360.0))
+    _txt_arrow.set("Modifier:  %+.1f°" % tilt_deg if abs(tilt_deg) >= 0.05
+                   else "Modifier:  0.0°")
 
     show_proj = _chk_proj.checked
     g_left, g_right, g_top, g_bottom = _padding()
@@ -360,6 +584,12 @@ def update() -> None:
         py = g_top  + (wz - WORLD_TOP)  / (WORLD_BOTTOM - WORLD_TOP) * (g_bottom - g_top)
         return _view.img_to_canvas(px, py)
 
+    # Charging this frame? Mirror the emu-thread gate (in _read_state) so the on-canvas
+    # swim indicator matches when the controller is actually being driven.
+    charging = bool(_armed and have and on_sea and (_angle_mode or _dest_set))
+    _reorienting = charging and _chg_phase.startswith("REORIENT")
+    _swim_rgb = (C_REORI if _reorienting else C_SWIM) & 0x00FFFFFF
+
     # ── draw ──────────────────────────────────────────────────────
     _canvas.clear()
 
@@ -386,6 +616,16 @@ def update() -> None:
     if have and on_sea:
         # Link dot + facing arrow
         lx, ly = w2c(cur_x, cur_z)
+        # swim indicator: two staggered sonar pings expanding from Link + a coloured ring,
+        # so "charging" reads at a glance without any text (green = charge, amber = reorient).
+        if charging:
+            PING = 36.0
+            for off in (0.0, 0.5):
+                p = ((_anim + off * PING) % PING) / PING
+                a = int(170 * (1.0 - p))
+                if a > 0:
+                    _canvas.circle((lx, ly), 7.0 + p * 24.0, (a << 24) | _swim_rgb, 2.0)
+            _canvas.circle((lx, ly), 8.5, 0xFF000000 | _swim_rgb, 2.0)
         _canvas.circle_filled((lx, ly), 6, C_LINK)
         if facing_hw is not None:
             rad = math.radians(mathutils.halfword_to_deg(facing_hw))
@@ -432,10 +672,24 @@ def update() -> None:
             _canvas.text((tx1 + ox, ty1 + oy), 0xFFFFFFFF, label1)
         _canvas.text((tx2, ty2), 0xFF888899, label2)
 
+    # ── swim status pill (top-left of the canvas; fixed size, never resizes the window) ──
+    if charging:
+        label = _chg_phase or "SWIM"
+        pill_w = 30.0 + len(label) * 7.0
+        _canvas.rect_filled((6, 6), (6 + pill_w, 25), 0xCC10101A, 5.0)
+        _canvas.rect((6, 6), (6 + pill_w, 25), 0x66000000 | _swim_rgb, 5.0, 1.0)
+        # blinking LED so it reads as "live"
+        if (_anim // 12) % 2 == 0:
+            _canvas.circle_filled((16, 15.5), 4.0, 0xFF000000 | _swim_rgb)
+        else:
+            _canvas.circle((16, 15.5), 4.0, 0xFF000000 | _swim_rgb, 1.5)
+        _canvas.text((26, 10), 0xFFEEEEEE, label)
+
     _canvas.commit()
 
     # ── status line (native widget below the map) ─────────────────
-
+    # NOTE: charge state is shown ON the canvas (pill + ping) on purpose -- appending it
+    # here lengthened the QLabel and grew the whole window. Keep this line fixed-width-ish.
     if not on_sea:
         _status.set(f"Not on Great Sea  (stage: {_current_stage or '—'})")
     elif _dest_set and have:
