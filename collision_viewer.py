@@ -187,16 +187,16 @@ _last = [None]         # last (snap, link) for redraw
 _diag = [False]
 
 
-def _collect_tris(snap, target, link, radius, cap):
+def _collect_tris(snap, link, radius, cap):
     """Gather the triangles to draw, using each mesh's CACHED per-tri centroid + class (no per-frame
     cross-product/sqrt or classify). Movable-BG tris are always kept (few, dynamic); static-room
     tris are pre-selected to the `cap` NEAREST LINK *before* projection, so we never project the
-    whole room. Returns (tris, total_shown) with tris = [(v0,v1,v2,cen,cls,is_floor,is_move), ...]
-    (already bounded to <= cap, so no post-projection cap is needed)."""
+    whole room. Selection is purely LINK-relative (no camera term) — the drawn set is invariant to
+    orbit/pan and changes only when Link moves. Returns (tris, total_shown) with
+    tris = [(v0,v1,v2,cen,cls,is_floor,is_move), ...] (already bounded to <= cap)."""
     floor = snap.get("floor")
     r2 = radius * radius
     lx, ly, lz = link
-    tx, ty, tz = target
     movebg = []
     static = []                    # (d2link, v0, v1, v2, cen, cls, is_floor)
     for bg, m in snap["meshes"].items():
@@ -215,12 +215,13 @@ def _collect_tris(snap, target, link, radius, cap):
             if is_move:
                 movebg.append((verts[a], verts[b], verts[c], cen, cls, is_floor, True))
                 continue
-            if radius > 0.0:
-                dx = cen[0]-tx; dy = cen[1]-ty; dz = cen[2]-tz
-                if dx*dx+dy*dy+dz*dz > r2:
-                    continue
+            # distance to LINK (not the camera target) — both the radius filter and the cap rank
+            # by this, so panning/orbiting the camera never changes which static tris are eligible.
             dx = cen[0]-lx; dy = cen[1]-ly; dz = cen[2]-lz
-            static.append((dx*dx+dy*dy+dz*dz, verts[a], verts[b], verts[c], cen, cls, is_floor))
+            d2 = dx*dx + dy*dy + dz*dz
+            if radius > 0.0 and d2 > r2:
+                continue
+            static.append((d2, verts[a], verts[b], verts[c], cen, cls, is_floor))
 
     total_shown = len(movebg) + len(static)
     keep_static = max(0, cap - len(movebg))
@@ -312,7 +313,7 @@ def draw(payload):
     # Collect already caps to the nearest-Link `cap` (movable BG always kept) using cached centroids
     # — so only ~cap triangles are ever projected, and the ImGui draw list can't overflow.
     cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
-    tris, total_shown = _collect_tris(snap, target, link, radius, cap)
+    tris, total_shown = _collect_tris(snap, link, radius, cap)
 
     # Project to screen (skip tris crossing the near plane), keep camera depth for the painter sort.
     drawable = []
