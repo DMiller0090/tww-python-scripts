@@ -297,6 +297,29 @@ def _draw_player_cone(oc, link, fwd):
         cv.triangle_filled(sa, sb, sd, _shade(sh))
 
 
+def _clip_near_project(oc, cverts):
+    """Clip a camera-space triangle to the half-space z >= NEAR (Sutherland-Hodgman) and project the
+    result to screen. Returns (screen_pts, avg_depth) — a 3- or 4-point polygon — or (None, 0).
+    This keeps LARGE triangles that straddle the camera plane (e.g. the tall Hyrule barrier walls),
+    which an all-or-nothing 'skip if any vertex behind near' test would drop entirely."""
+    near = oc.NEAR
+    out = []
+    n = len(cverts)
+    for i in range(n):
+        a = cverts[i]; b = cverts[(i + 1) % n]
+        ain = a[2] >= near
+        if ain:
+            out.append(a)
+        if ain != (b[2] >= near):                       # edge crosses the near plane → add cut point
+            t = (near - a[2]) / (b[2] - a[2])
+            out.append((a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, near))
+    if len(out) < 3:
+        return None, 0.0
+    foc = oc.focal
+    spts = [(W*0.5 + foc*c[0]/c[2], H*0.5 - foc*c[1]/c[2]) for c in out]
+    return spts, sum(c[2] for c in out) / len(out)
+
+
 def draw(payload):
     cv.clear()
     cv.rect_filled((0, 0), (W, H), C_BG)
@@ -315,38 +338,36 @@ def draw(payload):
     cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
     tris, total_shown = _collect_tris(snap, link, radius, cap)
 
-    # Project to screen (skip tris crossing the near plane), keep camera depth for the painter sort.
+    # Project to screen with near-plane clipping (large tris straddling the camera become 3-4 pt
+    # polygons instead of being dropped). Keep avg depth for the painter sort.
     drawable = []
     for v0, v1, v2, cen, cls, is_floor, is_move in tris:
-        c0, c1, c2 = oc.cam(v0), oc.cam(v1), oc.cam(v2)
-        if c0[2] <= oc.NEAR or c1[2] <= oc.NEAR or c2[2] <= oc.NEAR:
+        spoly, depth = _clip_near_project(oc, (oc.cam(v0), oc.cam(v1), oc.cam(v2)))
+        if spoly is None:
             continue
-        s0 = oc.screen(c0); s1 = oc.screen(c1); s2 = oc.screen(c2)
-        if not (s0 and s1 and s2):
-            continue
-        depth = (c0[2]+c1[2]+c2[2])/3.0
-        drawable.append((depth, s0, s1, s2, cls, is_floor, is_move))
+        drawable.append((depth, spoly, cls, is_floor, is_move))
 
     drawable.sort(key=lambda t: t[0], reverse=True)   # far first (painter's order)
     clipped = total_shown - len(tris)
 
     n = {"ground": 0, "wall": 0, "roof": 0}
     n_move = 0
-    for depth, s0, s1, s2, cls, is_floor, is_move in drawable:
+    for depth, spoly, cls, is_floor, is_move in drawable:
         n[cls] += 1
         if is_move:
             n_move += 1
         if cb_filled.checked:
             col = C_FLOOR_HL if is_floor else (C_MOVE if is_move else _FILL[cls])
-            cv.triangle_filled(s0, s1, s2, col)
+            for i in range(1, len(spoly) - 1):          # fan-triangulate the (clipped) polygon
+                cv.triangle_filled(spoly[0], spoly[i], spoly[i + 1], col)
         # Always outline movable-BG + the floor tri (they're small / important); room edges follow
         # the Wireframe toggle.
         if cb_wire.checked or is_floor or is_move:
             ec = C_FLOOR_HL if is_floor else (C_MOVE_EDGE if is_move else C_EDGE)
             th = 2 if (is_floor or is_move) else 1
-            cv.line(s0, s1, ec, thickness=th)
-            cv.line(s1, s2, ec, thickness=th)
-            cv.line(s2, s0, ec, thickness=th)
+            m = len(spoly)
+            for i in range(m):
+                cv.line(spoly[i], spoly[(i + 1) % m], ec, thickness=th)
 
     # Link as a directional cone (apex = facing); fall back to a haloed dot if facing is unavailable.
     fwd = payload[2]
