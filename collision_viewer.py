@@ -27,6 +27,7 @@ on_hostupdate (a second host-thread tick that crashed the core in this build). T
 while the game is RUNNING; a full pause freezes it until the next frame advances.
 """
 import math
+import struct
 
 from dolphin import gui, event, memory
 
@@ -41,6 +42,8 @@ class DolphinReader:
 
 RD = DolphinReader()
 LINK_X = 0x803D78FC   # three consecutive f32: X, Y, Z
+FACING = 0x803EA3D2   # u16 heading (0x10000 = 360deg). 0=north(-Z), 16384=east(+X), 49152=west(-X)
+FACING_LEN = 220.0    # world units the facing arrow extends
 
 # --- window / canvas / controls ------------------------------------------------------------
 W, H = 860, 560
@@ -75,7 +78,9 @@ C_WALL      = 0x99FF6C55
 C_ROOF      = 0x9945A6FF
 C_EDGE      = 0x33FFFFFF
 C_FLOOR_HL  = 0xFFFFE23C   # triangle Link stands on
-C_LINK      = 0xFFFFFFFF
+C_LINK      = 0xFF33E6FF   # Link marker — bright cyan (pops over the yellow floor tri)
+C_LINK_HALO = 0xFF0A1220   # dark ring/outline behind Link + facing arrow for contrast
+C_FACING    = 0xFF33E6FF   # facing arrow (matches marker)
 C_TXT       = 0xFFDDDDDD
 
 _FILL = {"ground": C_GROUND, "wall": C_WALL, "roof": C_ROOF}
@@ -156,9 +161,14 @@ def _apply_input():
 
 
 def _link_pos():
-    b = RD.read_bytes(LINK_X, 12)
-    import struct
-    return struct.unpack(">3f", b)
+    return struct.unpack(">3f", RD.read_bytes(LINK_X, 12))
+
+
+def _link_facing_dir():
+    """World-space forward unit vector from the u16 heading (fwd = (sin th, 0, -cos th))."""
+    raw = struct.unpack(">H", RD.read_bytes(FACING, 2))[0]
+    th = raw * (2.0 * math.pi / 65536.0)
+    return (math.sin(th), 0.0, -math.cos(th))
 
 
 _cache = [None]        # last collision snapshot (feeds cache= to reuse static room tables)
@@ -194,6 +204,32 @@ def _collect_tris(snap, target, radius):
     return out
 
 
+def _draw_facing_arrow(oc, link, fwd):
+    """Draw a haloed arrow from Link along the world facing direction, arrowhead in screen space."""
+    tip = (link[0] + fwd[0] * FACING_LEN, link[1] + fwd[1] * FACING_LEN, link[2] + fwd[2] * FACING_LEN)
+    a, b = oc.cam(link), oc.cam(tip)
+    if a[2] <= oc.NEAR or b[2] <= oc.NEAR:
+        return
+    s0, s1 = oc.screen(a), oc.screen(b)
+    if not (s0 and s1):
+        return
+
+    def _seg(p, q):
+        cv.line(p, q, C_LINK_HALO, thickness=5)   # dark outline
+        cv.line(p, q, C_FACING, thickness=2)      # bright core
+
+    _seg(s0, s1)
+    dx, dy = s1[0] - s0[0], s1[1] - s0[1]
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+    head = 15.0
+    for ang in (math.radians(150.0), math.radians(-150.0)):
+        ca, sa = math.cos(ang), math.sin(ang)
+        hx = s1[0] + (ux * ca - uy * sa) * head
+        hy = s1[1] + (ux * sa + uy * ca) * head
+        _seg(s1, (hx, hy))
+
+
 def draw(payload):
     cv.clear()
     cv.rect_filled((0, 0), (W, H), C_BG)
@@ -201,7 +237,7 @@ def draw(payload):
         cv.text((16, 24), C_TXT, "waiting for game / stage collision...")
         cv.commit()
         return
-    snap, link = payload
+    snap, link = payload[0], payload[1]
     base = link if cb_follow.checked else (0.0, 0.0, 0.0)
     target = (base[0]+_pan[0], base[1]+_pan[1], base[2]+_pan[2])
     oc = OrbitCam(target, _view["az"], _view["el"], _dist())
@@ -236,10 +272,14 @@ def draw(payload):
             cv.line(s1, s2, ec, thickness=th)
             cv.line(s2, s0, ec, thickness=th)
 
-    # Link marker
+    # Link facing arrow (drawn first so the marker sits on top of its base) + marker.
+    fwd = payload[2]
+    if fwd is not None:
+        _draw_facing_arrow(oc, link, fwd)
     ls = oc.screen(oc.cam(link))
     if ls:
-        cv.circle_filled(ls, 5, C_LINK)
+        cv.circle_filled(ls, 9, C_LINK_HALO)   # dark halo so Link reads over any surface color
+        cv.circle_filled(ls, 6, C_LINK)
 
     floor = snap.get("floor")
     ftxt = f"floor tri {floor[1]} (slot {floor[0]})" if floor else "airborne / no floor"
@@ -250,7 +290,7 @@ def draw(payload):
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
     cv.text((10, H-16), C_TXT,
             "L-drag: orbit   R-drag: pan   wheel: zoom   (green=ground red=wall blue=roof "
-            "yellow=Link's floor, white=Link)" + grab)
+            "yellow=Link's floor, cyan dot+arrow=Link & facing)" + grab)
     cv.commit()
 
 
@@ -260,7 +300,11 @@ def on_frame():
         snap = read_collision(RD, cache=_cache[0])
         _cache[0] = snap
         link = _link_pos()
-        _last[0] = (snap, link)
+        try:
+            fwd = _link_facing_dir()
+        except Exception:
+            fwd = None
+        _last[0] = (snap, link, fwd)
         if not _diag[0]:
             tot = sum(m["t_num"] for m in snap["meshes"].values())
             print(f"[collision_viewer] first live frame OK: stage={snap['stage']} "
