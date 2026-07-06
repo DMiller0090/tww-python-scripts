@@ -292,6 +292,7 @@ def draw(payload):
     tris = _collect_tris(snap, target, radius)
 
     # Project to screen (skip tris crossing the near plane), keep camera depth for painter sort.
+    lx, ly, lz = link
     drawable = []
     for v0, v1, v2, cen, cls, is_floor in tris:
         c0, c1, c2 = oc.cam(v0), oc.cam(v1), oc.cam(v2)
@@ -301,23 +302,27 @@ def draw(payload):
         if not (s0 and s1 and s2):
             continue
         depth = (c0[2]+c1[2]+c2[2])/3.0
-        drawable.append((depth, s0, s1, s2, cls, is_floor))
-
-    drawable.sort(key=lambda t: t[0], reverse=True)   # far first
+        d2link = (cen[0]-lx)**2 + (cen[1]-ly)**2 + (cen[2]-lz)**2   # world dist^2 to Link
+        drawable.append((depth, s0, s1, s2, cls, is_floor, d2link))
 
     # Cap the drawn count so the ImGui draw list can never overflow its 16-bit index buffer and
-    # crash the core. Keep the NEAREST `cap` (they sit at the tail after the far-first sort), still
-    # drawn far-first among themselves. The floor-highlight tri is force-kept so it never drops.
+    # crash the core. Keep the `cap` triangles NEAREST LINK (world distance — the region of
+    # interest), not nearest the orbiting camera; the floor-highlight tri is always kept.
     total_vis = len(drawable)
     cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
     clipped = 0
     if total_vis > cap:
-        floor_tris = [t for t in drawable[:-cap] if t[5]]   # rescue any highlighted floor tri
-        drawable = floor_tris + drawable[-cap:]
+        drawable.sort(key=lambda t: t[6])            # nearest Link first
+        kept = drawable[:cap]
+        if not any(t[5] for t in kept):              # rescue the floor tri if it fell outside
+            kept += [t for t in drawable[cap:] if t[5]]
+        drawable = kept
         clipped = total_vis - len(drawable)
 
+    drawable.sort(key=lambda t: t[0], reverse=True)   # far first (painter's order)
+
     n = {"ground": 0, "wall": 0, "roof": 0}
-    for depth, s0, s1, s2, cls, is_floor in drawable:
+    for depth, s0, s1, s2, cls, is_floor, _d2 in drawable:
         n[cls] += 1
         if cb_filled.checked:
             col = C_FLOOR_HL if is_floor else _FILL[cls]
