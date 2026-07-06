@@ -43,8 +43,8 @@ class DolphinReader:
 RD = DolphinReader()
 LINK_X = 0x803D78FC   # three consecutive f32: X, Y, Z
 FACING = 0x803EA3D2   # u16 heading (0x10000 = 360deg). 0=north(-Z), 16384=east(+X), 49152=west(-X)
-# Player-prism dimensions (world units): nose forward, tail back, half-width, half-height, lift.
-PRISM_NOSE, PRISM_TAIL, PRISM_HALFW, PRISM_HALFH, PRISM_LIFT = 130.0, 70.0, 55.0, 42.0, 50.0
+# Player-cone dimensions (world units): apex(nose) forward, base back, base radius, lift, segments.
+CONE_NOSE, CONE_BACK, CONE_RADIUS, CONE_LIFT, CONE_SEGS = 140.0, 60.0, 62.0, 55.0, 16
 
 # --- window / canvas / controls ------------------------------------------------------------
 W, H = 860, 560
@@ -165,10 +165,11 @@ def _link_pos():
 
 
 def _link_facing_dir():
-    """World-space forward unit vector from the u16 heading (fwd = (sin th, 0, -cos th))."""
+    """World-space forward unit vector Link's model points along, from the u16 heading.
+    The raw heading's (sin th, 0, -cos th) points 180deg opposite the visual facing, so negate it."""
     raw = struct.unpack(">H", RD.read_bytes(FACING, 2))[0]
     th = raw * (2.0 * math.pi / 65536.0)
-    return (math.sin(th), 0.0, -math.cos(th))
+    return (-math.sin(th), 0.0, math.cos(th))
 
 
 _cache = [None]        # last collision snapshot (feeds cache= to reuse static room tables)
@@ -222,32 +223,36 @@ def _face_normal(a, b, c):
     return (nx/m, ny/m, nz/m)
 
 
-def _draw_player_prism(oc, link, fwd):
-    """Draw Link as a shaded 3D triangular prism whose POINT (nose) faces the heading `fwd`.
-    Faces are painter-sorted among themselves and drawn opaque on top of the scene."""
-    up = (0.0, 1.0, 0.0)
-    rx, ry, rz = fwd[1]*up[2]-fwd[2]*up[1], fwd[2]*up[0]-fwd[0]*up[2], fwd[0]*up[1]-fwd[1]*up[0]
+def _draw_player_cone(oc, link, fwd):
+    """Draw Link as a shaded 3D cone whose APEX (point) faces the heading `fwd`. Facets are
+    painter-sorted among themselves and drawn opaque on top of the scene."""
+    # Orthonormal frame around fwd: right = fwd x worldUp, upn = right x fwd.
+    wu = (0.0, 1.0, 0.0)
+    rx, ry, rz = fwd[1]*wu[2]-fwd[2]*wu[1], fwd[2]*wu[0]-fwd[0]*wu[2], fwd[0]*wu[1]-fwd[1]*wu[0]
     rm = math.sqrt(rx*rx+ry*ry+rz*rz) or 1.0
     right = (rx/rm, ry/rm, rz/rm)
-    c = (link[0], link[1] + PRISM_LIFT, link[2])
+    ux, uy, uz = right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0]
+    um = math.sqrt(ux*ux+uy*uy+uz*uz) or 1.0
+    upn = (ux/um, uy/um, uz/um)
 
-    def P(f, r, u):
-        return (c[0]+fwd[0]*f+right[0]*r+up[0]*u,
-                c[1]+fwd[1]*f+right[1]*r+up[1]*u,
-                c[2]+fwd[2]*f+right[2]*r+up[2]*u)
+    c = (link[0], link[1] + CONE_LIFT, link[2])
+    apex = (c[0]+fwd[0]*CONE_NOSE, c[1]+fwd[1]*CONE_NOSE, c[2]+fwd[2]*CONE_NOSE)
+    bc = (c[0]-fwd[0]*CONE_BACK, c[1]-fwd[1]*CONE_BACK, c[2]-fwd[2]*CONE_BACK)
+    ring = []
+    for i in range(CONE_SEGS):
+        a = 2.0 * math.pi * i / CONE_SEGS
+        ca, sa = math.cos(a), math.sin(a)
+        ring.append((bc[0] + (right[0]*ca + upn[0]*sa)*CONE_RADIUS,
+                     bc[1] + (right[1]*ca + upn[1]*sa)*CONE_RADIUS,
+                     bc[2] + (right[2]*ca + upn[2]*sa)*CONE_RADIUS))
+    faces = []
+    for i in range(CONE_SEGS):
+        j = (i + 1) % CONE_SEGS
+        faces.append((apex, ring[i], ring[j]))   # side facet
+        faces.append((bc, ring[j], ring[i]))     # base cap facet
 
-    nT = P(PRISM_NOSE, 0, PRISM_HALFH);   nB = P(PRISM_NOSE, 0, -PRISM_HALFH)
-    lT = P(-PRISM_TAIL, PRISM_HALFW, PRISM_HALFH);  lB = P(-PRISM_TAIL, PRISM_HALFW, -PRISM_HALFH)
-    rT = P(-PRISM_TAIL, -PRISM_HALFW, PRISM_HALFH); rB = P(-PRISM_TAIL, -PRISM_HALFW, -PRISM_HALFH)
-    faces = [
-        (nT, lT, rT), (nB, rB, lB),            # top, bottom
-        (nT, nB, lB), (nT, lB, lT),            # left side (nose → back-left)
-        (nT, rT, rB), (nT, rB, nB),            # right side (nose → back-right)
-        (lT, lB, rB), (lT, rB, rT),            # back
-    ]
     lm = math.sqrt(sum(x*x for x in _LIGHT)) or 1.0
     ld = tuple(x/lm for x in _LIGHT)
-
     items = []
     for a, b, d in faces:
         n = _face_normal(a, b, d)
@@ -262,9 +267,6 @@ def _draw_player_prism(oc, link, fwd):
     items.sort(key=lambda t: t[0], reverse=True)
     for _, sa, sb, sd, sh in items:
         cv.triangle_filled(sa, sb, sd, _shade(sh))
-        cv.line(sa, sb, C_LINK_HALO, thickness=1)
-        cv.line(sb, sd, C_LINK_HALO, thickness=1)
-        cv.line(sd, sa, C_LINK_HALO, thickness=1)
 
 
 def draw(payload):
@@ -309,10 +311,10 @@ def draw(payload):
             cv.line(s1, s2, ec, thickness=th)
             cv.line(s2, s0, ec, thickness=th)
 
-    # Link as a directional prism (nose = facing); fall back to a haloed dot if facing is unavailable.
+    # Link as a directional cone (apex = facing); fall back to a haloed dot if facing is unavailable.
     fwd = payload[2]
     if fwd is not None:
-        _draw_player_prism(oc, link, fwd)
+        _draw_player_cone(oc, link, fwd)
     else:
         ls = oc.screen(oc.cam(link))
         if ls:
@@ -328,7 +330,7 @@ def draw(payload):
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
     cv.text((10, H-16), C_TXT,
             "L-drag: orbit   R-drag: pan   wheel: zoom   (green=ground red=wall blue=roof "
-            "yellow=Link's floor, cyan prism=Link (nose=facing))" + grab)
+            "yellow=Link's floor, cyan cone=Link (apex=facing))" + grab)
     cv.commit()
 
 
