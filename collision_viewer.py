@@ -84,6 +84,8 @@ C_GROUND    = 0x9955DD66
 C_WALL      = 0x99FF6C55
 C_ROOF      = 0x9945A6FF
 C_EDGE      = 0x33FFFFFF
+C_MOVE      = 0x99C46CFF   # movable-BG fill (purple) — distinguishes dynamic objects from the room
+C_MOVE_EDGE = 0xFFD08CFF   # movable-BG edge (bright purple), always drawn so small objects pop
 C_FLOOR_HL  = 0xFFFFE23C   # triangle Link stands on
 C_LINK      = 0xFF33E6FF   # Link marker — bright cyan (pops over the yellow floor tri)
 C_LINK_HALO = 0xFF0A1220   # dark edge/outline on the player prism for contrast
@@ -192,7 +194,8 @@ def _collect_tris(snap, target, radius):
     floor = snap.get("floor")
     r2 = radius * radius
     for bg, m in snap["meshes"].items():
-        if m["is_movebg"] and not cb_movebg.checked:
+        is_move = m["is_movebg"]
+        if is_move and not cb_movebg.checked:
             continue
         verts = m["verts"]
         floor_poly = floor[1] if (floor and floor[0] == bg) else -1
@@ -201,14 +204,16 @@ def _collect_tris(snap, target, radius):
             cx = (v0[0]+v1[0]+v2[0])/3.0
             cy = (v0[1]+v1[1]+v2[1])/3.0
             cz = (v0[2]+v1[2]+v2[2])/3.0
-            if radius > 0.0:
+            # Movable-BG objects (doors/platforms/blocks) are the dynamic collision of interest and
+            # are few — exempt them from the radius filter so they always show.
+            if radius > 0.0 and not is_move:
                 dx, dy, dz = cx-target[0], cy-target[1], cz-target[2]
                 if dx*dx+dy*dy+dz*dz > r2:
                     continue
             cls = classify(tri_normal(v0, v1, v2)[1])
             if not _SHOW[cls].checked and not (pi == floor_poly):
                 continue
-            out.append((v0, v1, v2, (cx, cy, cz), cls, pi == floor_poly))
+            out.append((v0, v1, v2, (cx, cy, cz), cls, pi == floor_poly, is_move))
     return out
 
 
@@ -294,7 +299,7 @@ def draw(payload):
     # Project to screen (skip tris crossing the near plane), keep camera depth for painter sort.
     lx, ly, lz = link
     drawable = []
-    for v0, v1, v2, cen, cls, is_floor in tris:
+    for v0, v1, v2, cen, cls, is_floor, is_move in tris:
         c0, c1, c2 = oc.cam(v0), oc.cam(v1), oc.cam(v2)
         if c0[2] <= oc.NEAR or c1[2] <= oc.NEAR or c2[2] <= oc.NEAR:
             continue
@@ -303,33 +308,42 @@ def draw(payload):
             continue
         depth = (c0[2]+c1[2]+c2[2])/3.0
         d2link = (cen[0]-lx)**2 + (cen[1]-ly)**2 + (cen[2]-lz)**2   # world dist^2 to Link
-        drawable.append((depth, s0, s1, s2, cls, is_floor, d2link))
+        drawable.append((depth, s0, s1, s2, cls, is_floor, d2link, is_move))
 
     # Cap the drawn count so the ImGui draw list can never overflow its 16-bit index buffer and
-    # crash the core. Keep the `cap` triangles NEAREST LINK (world distance — the region of
-    # interest), not nearest the orbiting camera; the floor-highlight tri is always kept.
+    # crash the core. Movable-BG tris are few and are the objects of interest, so ALWAYS keep them
+    # (up to a safety sub-cap); fill the remaining budget with the STATIC room tris NEAREST LINK
+    # (world distance, not nearest the orbiting camera). The floor-highlight tri is always kept.
     total_vis = len(drawable)
     cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
     clipped = 0
     if total_vis > cap:
-        drawable.sort(key=lambda t: t[6])            # nearest Link first
-        kept = drawable[:cap]
-        if not any(t[5] for t in kept):              # rescue the floor tri if it fell outside
-            kept += [t for t in drawable[cap:] if t[5]]
+        move = [t for t in drawable if t[7]][:cap]           # keep all movable BG (bounded)
+        static = [t for t in drawable if not t[7]]
+        static.sort(key=lambda t: t[6])                      # nearest Link first
+        keep_static = max(0, cap - len(move))
+        kept = move + static[:keep_static]
+        if not any(t[5] for t in kept):                      # rescue the floor tri if it fell out
+            kept += [t for t in static[keep_static:] if t[5]]
         drawable = kept
         clipped = total_vis - len(drawable)
 
     drawable.sort(key=lambda t: t[0], reverse=True)   # far first (painter's order)
 
     n = {"ground": 0, "wall": 0, "roof": 0}
-    for depth, s0, s1, s2, cls, is_floor, _d2 in drawable:
+    n_move = 0
+    for depth, s0, s1, s2, cls, is_floor, _d2, is_move in drawable:
         n[cls] += 1
+        if is_move:
+            n_move += 1
         if cb_filled.checked:
-            col = C_FLOOR_HL if is_floor else _FILL[cls]
+            col = C_FLOOR_HL if is_floor else (C_MOVE if is_move else _FILL[cls])
             cv.triangle_filled(s0, s1, s2, col)
-        if cb_wire.checked or is_floor:
-            ec = C_FLOOR_HL if is_floor else C_EDGE
-            th = 2 if is_floor else 1
+        # Always outline movable-BG + the floor tri (they're small / important); room edges follow
+        # the Wireframe toggle.
+        if cb_wire.checked or is_floor or is_move:
+            ec = C_FLOOR_HL if is_floor else (C_MOVE_EDGE if is_move else C_EDGE)
+            th = 2 if (is_floor or is_move) else 1
             cv.line(s0, s1, ec, thickness=th)
             cv.line(s1, s2, ec, thickness=th)
             cv.line(s2, s0, ec, thickness=th)
@@ -349,12 +363,12 @@ def draw(payload):
     cliptxt = f"  CLIPPED {clipped} (lower Draw radius / zoom in to see all)" if clipped else ""
     cv.text((10, 16), C_TXT,
             f"stage {snap['stage']}  meshes={len(snap['meshes'])}  drawn {len(drawable)}/{total_vis}vis"
-            f"  [G {n['ground']}  W {n['wall']}  R {n['roof']}]  {ftxt}{cliptxt}")
+            f"  [G {n['ground']}  W {n['wall']}  R {n['roof']}  MoveBG {n_move}]  {ftxt}{cliptxt}")
     mode = _drag["mode"]
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
     cv.text((10, H-16), C_TXT,
             "L-drag: orbit   R-drag: pan   wheel: zoom   (green=ground red=wall blue=roof "
-            "yellow=Link's floor, cyan cone=Link (apex=facing))" + grab)
+            "purple=movable BG, yellow=Link's floor, cyan cone=Link)" + grab)
     cv.commit()
 
 
