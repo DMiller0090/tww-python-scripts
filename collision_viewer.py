@@ -43,7 +43,8 @@ class DolphinReader:
 RD = DolphinReader()
 LINK_X = 0x803D78FC   # three consecutive f32: X, Y, Z
 FACING = 0x803EA3D2   # u16 heading (0x10000 = 360deg). 0=north(-Z), 16384=east(+X), 49152=west(-X)
-FACING_LEN = 220.0    # world units the facing arrow extends
+# Player-prism dimensions (world units): nose forward, tail back, half-width, half-height, lift.
+PRISM_NOSE, PRISM_TAIL, PRISM_HALFW, PRISM_HALFH, PRISM_LIFT = 130.0, 70.0, 55.0, 42.0, 50.0
 
 # --- window / canvas / controls ------------------------------------------------------------
 W, H = 860, 560
@@ -79,8 +80,7 @@ C_ROOF      = 0x9945A6FF
 C_EDGE      = 0x33FFFFFF
 C_FLOOR_HL  = 0xFFFFE23C   # triangle Link stands on
 C_LINK      = 0xFF33E6FF   # Link marker — bright cyan (pops over the yellow floor tri)
-C_LINK_HALO = 0xFF0A1220   # dark ring/outline behind Link + facing arrow for contrast
-C_FACING    = 0xFF33E6FF   # facing arrow (matches marker)
+C_LINK_HALO = 0xFF0A1220   # dark edge/outline on the player prism for contrast
 C_TXT       = 0xFFDDDDDD
 
 _FILL = {"ground": C_GROUND, "wall": C_WALL, "roof": C_ROOF}
@@ -204,30 +204,67 @@ def _collect_tris(snap, target, radius):
     return out
 
 
-def _draw_facing_arrow(oc, link, fwd):
-    """Draw a haloed arrow from Link along the world facing direction, arrowhead in screen space."""
-    tip = (link[0] + fwd[0] * FACING_LEN, link[1] + fwd[1] * FACING_LEN, link[2] + fwd[2] * FACING_LEN)
-    a, b = oc.cam(link), oc.cam(tip)
-    if a[2] <= oc.NEAR or b[2] <= oc.NEAR:
-        return
-    s0, s1 = oc.screen(a), oc.screen(b)
-    if not (s0 and s1):
-        return
+_CYAN = (0x33, 0xE6, 0xFF)   # base color the prism faces are shaded from
+_LIGHT = (0.30, 0.90, 0.45)  # directional light for face shading (normalized below)
 
-    def _seg(p, q):
-        cv.line(p, q, C_LINK_HALO, thickness=5)   # dark outline
-        cv.line(p, q, C_FACING, thickness=2)      # bright core
 
-    _seg(s0, s1)
-    dx, dy = s1[0] - s0[0], s1[1] - s0[1]
-    L = math.hypot(dx, dy) or 1.0
-    ux, uy = dx / L, dy / L
-    head = 15.0
-    for ang in (math.radians(150.0), math.radians(-150.0)):
-        ca, sa = math.cos(ang), math.sin(ang)
-        hx = s1[0] + (ux * ca - uy * sa) * head
-        hy = s1[1] + (ux * sa + uy * ca) * head
-        _seg(s1, (hx, hy))
+def _shade(k):
+    """Flat-shade the base cyan by factor k (0..1) → opaque ARGB."""
+    r = min(255, int(_CYAN[0] * k)); g = min(255, int(_CYAN[1] * k)); b = min(255, int(_CYAN[2] * k))
+    return 0xFF000000 | (r << 16) | (g << 8) | b
+
+
+def _face_normal(a, b, c):
+    ax, ay, az = b[0]-a[0], b[1]-a[1], b[2]-a[2]
+    bx, by, bz = c[0]-a[0], c[1]-a[1], c[2]-a[2]
+    nx, ny, nz = ay*bz-az*by, az*bx-ax*bz, ax*by-ay*bx
+    m = math.sqrt(nx*nx+ny*ny+nz*nz) or 1.0
+    return (nx/m, ny/m, nz/m)
+
+
+def _draw_player_prism(oc, link, fwd):
+    """Draw Link as a shaded 3D triangular prism whose POINT (nose) faces the heading `fwd`.
+    Faces are painter-sorted among themselves and drawn opaque on top of the scene."""
+    up = (0.0, 1.0, 0.0)
+    rx, ry, rz = fwd[1]*up[2]-fwd[2]*up[1], fwd[2]*up[0]-fwd[0]*up[2], fwd[0]*up[1]-fwd[1]*up[0]
+    rm = math.sqrt(rx*rx+ry*ry+rz*rz) or 1.0
+    right = (rx/rm, ry/rm, rz/rm)
+    c = (link[0], link[1] + PRISM_LIFT, link[2])
+
+    def P(f, r, u):
+        return (c[0]+fwd[0]*f+right[0]*r+up[0]*u,
+                c[1]+fwd[1]*f+right[1]*r+up[1]*u,
+                c[2]+fwd[2]*f+right[2]*r+up[2]*u)
+
+    nT = P(PRISM_NOSE, 0, PRISM_HALFH);   nB = P(PRISM_NOSE, 0, -PRISM_HALFH)
+    lT = P(-PRISM_TAIL, PRISM_HALFW, PRISM_HALFH);  lB = P(-PRISM_TAIL, PRISM_HALFW, -PRISM_HALFH)
+    rT = P(-PRISM_TAIL, -PRISM_HALFW, PRISM_HALFH); rB = P(-PRISM_TAIL, -PRISM_HALFW, -PRISM_HALFH)
+    faces = [
+        (nT, lT, rT), (nB, rB, lB),            # top, bottom
+        (nT, nB, lB), (nT, lB, lT),            # left side (nose → back-left)
+        (nT, rT, rB), (nT, rB, nB),            # right side (nose → back-right)
+        (lT, lB, rB), (lT, rB, rT),            # back
+    ]
+    lm = math.sqrt(sum(x*x for x in _LIGHT)) or 1.0
+    ld = tuple(x/lm for x in _LIGHT)
+
+    items = []
+    for a, b, d in faces:
+        n = _face_normal(a, b, d)
+        sh = 0.5 + 0.5 * abs(n[0]*ld[0] + n[1]*ld[1] + n[2]*ld[2])   # winding-independent
+        ca, cb, cd = oc.cam(a), oc.cam(b), oc.cam(d)
+        if ca[2] <= oc.NEAR or cb[2] <= oc.NEAR or cd[2] <= oc.NEAR:
+            continue
+        sa, sb, sd = oc.screen(ca), oc.screen(cb), oc.screen(cd)
+        if not (sa and sb and sd):
+            continue
+        items.append(((ca[2]+cb[2]+cd[2])/3.0, sa, sb, sd, sh))
+    items.sort(key=lambda t: t[0], reverse=True)
+    for _, sa, sb, sd, sh in items:
+        cv.triangle_filled(sa, sb, sd, _shade(sh))
+        cv.line(sa, sb, C_LINK_HALO, thickness=1)
+        cv.line(sb, sd, C_LINK_HALO, thickness=1)
+        cv.line(sd, sa, C_LINK_HALO, thickness=1)
 
 
 def draw(payload):
@@ -272,14 +309,15 @@ def draw(payload):
             cv.line(s1, s2, ec, thickness=th)
             cv.line(s2, s0, ec, thickness=th)
 
-    # Link facing arrow (drawn first so the marker sits on top of its base) + marker.
+    # Link as a directional prism (nose = facing); fall back to a haloed dot if facing is unavailable.
     fwd = payload[2]
     if fwd is not None:
-        _draw_facing_arrow(oc, link, fwd)
-    ls = oc.screen(oc.cam(link))
-    if ls:
-        cv.circle_filled(ls, 9, C_LINK_HALO)   # dark halo so Link reads over any surface color
-        cv.circle_filled(ls, 6, C_LINK)
+        _draw_player_prism(oc, link, fwd)
+    else:
+        ls = oc.screen(oc.cam(link))
+        if ls:
+            cv.circle_filled(ls, 9, C_LINK_HALO)
+            cv.circle_filled(ls, 6, C_LINK)
 
     floor = snap.get("floor")
     ftxt = f"floor tri {floor[1]} (slot {floor[0]})" if floor else "airborne / no floor"
@@ -290,7 +328,7 @@ def draw(payload):
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
     cv.text((10, H-16), C_TXT,
             "L-drag: orbit   R-drag: pan   wheel: zoom   (green=ground red=wall blue=roof "
-            "yellow=Link's floor, cyan dot+arrow=Link & facing)" + grab)
+            "yellow=Link's floor, cyan prism=Link (nose=facing))" + grab)
     cv.commit()
 
 
