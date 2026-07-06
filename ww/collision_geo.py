@@ -122,6 +122,19 @@ def _read_mesh(r, bgw):
         a, b, c, tid, grp = struct.unpack_from(">5H", tbytes, i * 10)
         tris.append((a, b, c, tid, grp))
 
+    # Precompute per-triangle centroid + surface class ONCE (they don't change for a given mesh
+    # state). For the static room this is cached across frames with the mesh; for movable BG it is
+    # recomputed each frame (few tris). This keeps the per-frame viewer off the cross-product+sqrt
+    # (tri_normal) and classify path for thousands of static triangles.
+    centroids = []
+    classes = []
+    for a, b, c, tid, grp in tris:
+        v0 = verts[a]; v1 = verts[b]; v2 = verts[c]
+        centroids.append(((v0[0]+v1[0]+v2[0]) / 3.0,
+                          (v0[1]+v1[1]+v2[1]) / 3.0,
+                          (v0[2]+v1[2]+v2[2]) / 3.0))
+        classes.append(classify(tri_normal(v0, v1, v2)[1]))
+
     return {
         "bgw": bgw,
         "pm_bgd": pm_bgd,
@@ -131,6 +144,8 @@ def _read_mesh(r, bgw):
         "t_num": t_num,
         "verts": verts,
         "tris": tris,
+        "centroids": centroids,
+        "classes": classes,
         "v_tbl": v_tbl,
     }
 

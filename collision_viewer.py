@@ -26,12 +26,13 @@ STABILITY: all work (memory read, input, draw) happens on the SINGLE on_frameadv
 on_hostupdate (a second host-thread tick that crashed the core in this build). The view updates
 while the game is RUNNING; a full pause freezes it until the next frame advances.
 """
+import heapq
 import math
 import struct
 
 from dolphin import gui, event, memory
 
-from ww.collision_geo import read_collision, tri_normal, classify
+from ww.collision_geo import read_collision
 
 
 class DolphinReader:
@@ -186,35 +187,49 @@ _last = [None]         # last (snap, link) for redraw
 _diag = [False]
 
 
-def _collect_tris(snap, target, radius):
-    """Flatten meshes → list of (depth_key, screen_pts, fill_color) ready to paint, plus the
-    highlighted floor triangle. Applies the radius filter + near-plane skip. depth_key is set by
-    caller's camera; here we just gather world tris + colors."""
-    out = []
+def _collect_tris(snap, target, link, radius, cap):
+    """Gather the triangles to draw, using each mesh's CACHED per-tri centroid + class (no per-frame
+    cross-product/sqrt or classify). Movable-BG tris are always kept (few, dynamic); static-room
+    tris are pre-selected to the `cap` NEAREST LINK *before* projection, so we never project the
+    whole room. Returns (tris, total_shown) with tris = [(v0,v1,v2,cen,cls,is_floor,is_move), ...]
+    (already bounded to <= cap, so no post-projection cap is needed)."""
     floor = snap.get("floor")
     r2 = radius * radius
+    lx, ly, lz = link
+    tx, ty, tz = target
+    movebg = []
+    static = []                    # (d2link, v0, v1, v2, cen, cls, is_floor)
     for bg, m in snap["meshes"].items():
         is_move = m["is_movebg"]
         if is_move and not cb_movebg.checked:
             continue
-        verts = m["verts"]
+        verts = m["verts"]; cents = m["centroids"]; clss = m["classes"]; tris = m["tris"]
         floor_poly = floor[1] if (floor and floor[0] == bg) else -1
-        for pi, (a, b, c, tid, grp) in enumerate(m["tris"]):
-            v0, v1, v2 = verts[a], verts[b], verts[c]
-            cx = (v0[0]+v1[0]+v2[0])/3.0
-            cy = (v0[1]+v1[1]+v2[1])/3.0
-            cz = (v0[2]+v1[2]+v2[2])/3.0
-            # Movable-BG objects (doors/platforms/blocks) are the dynamic collision of interest and
-            # are few — exempt them from the radius filter so they always show.
-            if radius > 0.0 and not is_move:
-                dx, dy, dz = cx-target[0], cy-target[1], cz-target[2]
+        for pi in range(len(tris)):
+            cls = clss[pi]
+            is_floor = (pi == floor_poly)
+            if not _SHOW[cls].checked and not is_floor:
+                continue
+            a, b, c = tris[pi][0], tris[pi][1], tris[pi][2]
+            cen = cents[pi]
+            if is_move:
+                movebg.append((verts[a], verts[b], verts[c], cen, cls, is_floor, True))
+                continue
+            if radius > 0.0:
+                dx = cen[0]-tx; dy = cen[1]-ty; dz = cen[2]-tz
                 if dx*dx+dy*dy+dz*dz > r2:
                     continue
-            cls = classify(tri_normal(v0, v1, v2)[1])
-            if not _SHOW[cls].checked and not (pi == floor_poly):
-                continue
-            out.append((v0, v1, v2, (cx, cy, cz), cls, pi == floor_poly, is_move))
-    return out
+            dx = cen[0]-lx; dy = cen[1]-ly; dz = cen[2]-lz
+            static.append((dx*dx+dy*dy+dz*dz, verts[a], verts[b], verts[c], cen, cls, is_floor))
+
+    total_shown = len(movebg) + len(static)
+    keep_static = max(0, cap - len(movebg))
+    if len(static) > keep_static:
+        # Nearest Link only. The floor tri Link stands on is ~0 distance away, so it's always in
+        # this set (no separate rescue needed).
+        static = heapq.nsmallest(keep_static, static, key=lambda t: t[0])
+    out = movebg + [(t[1], t[2], t[3], t[4], t[5], t[6], False) for t in static]
+    return out, total_shown
 
 
 _CYAN = (0x33, 0xE6, 0xFF)   # base color the prism faces are shaded from
@@ -294,10 +309,12 @@ def draw(payload):
     oc = OrbitCam(target, _view["az"], _view["el"], _dist())
     radius = sld_radius.value
 
-    tris = _collect_tris(snap, target, radius)
+    # Collect already caps to the nearest-Link `cap` (movable BG always kept) using cached centroids
+    # — so only ~cap triangles are ever projected, and the ImGui draw list can't overflow.
+    cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
+    tris, total_shown = _collect_tris(snap, target, link, radius, cap)
 
-    # Project to screen (skip tris crossing the near plane), keep camera depth for painter sort.
-    lx, ly, lz = link
+    # Project to screen (skip tris crossing the near plane), keep camera depth for the painter sort.
     drawable = []
     for v0, v1, v2, cen, cls, is_floor, is_move in tris:
         c0, c1, c2 = oc.cam(v0), oc.cam(v1), oc.cam(v2)
@@ -307,32 +324,14 @@ def draw(payload):
         if not (s0 and s1 and s2):
             continue
         depth = (c0[2]+c1[2]+c2[2])/3.0
-        d2link = (cen[0]-lx)**2 + (cen[1]-ly)**2 + (cen[2]-lz)**2   # world dist^2 to Link
-        drawable.append((depth, s0, s1, s2, cls, is_floor, d2link, is_move))
-
-    # Cap the drawn count so the ImGui draw list can never overflow its 16-bit index buffer and
-    # crash the core. Movable-BG tris are few and are the objects of interest, so ALWAYS keep them
-    # (up to a safety sub-cap); fill the remaining budget with the STATIC room tris NEAREST LINK
-    # (world distance, not nearest the orbiting camera). The floor-highlight tri is always kept.
-    total_vis = len(drawable)
-    cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
-    clipped = 0
-    if total_vis > cap:
-        move = [t for t in drawable if t[7]][:cap]           # keep all movable BG (bounded)
-        static = [t for t in drawable if not t[7]]
-        static.sort(key=lambda t: t[6])                      # nearest Link first
-        keep_static = max(0, cap - len(move))
-        kept = move + static[:keep_static]
-        if not any(t[5] for t in kept):                      # rescue the floor tri if it fell out
-            kept += [t for t in static[keep_static:] if t[5]]
-        drawable = kept
-        clipped = total_vis - len(drawable)
+        drawable.append((depth, s0, s1, s2, cls, is_floor, is_move))
 
     drawable.sort(key=lambda t: t[0], reverse=True)   # far first (painter's order)
+    clipped = total_shown - len(tris)
 
     n = {"ground": 0, "wall": 0, "roof": 0}
     n_move = 0
-    for depth, s0, s1, s2, cls, is_floor, _d2, is_move in drawable:
+    for depth, s0, s1, s2, cls, is_floor, is_move in drawable:
         n[cls] += 1
         if is_move:
             n_move += 1
@@ -362,7 +361,7 @@ def draw(payload):
     ftxt = f"floor tri {floor[1]} (slot {floor[0]})" if floor else "airborne / no floor"
     cliptxt = f"  CLIPPED {clipped} (lower Draw radius / zoom in to see all)" if clipped else ""
     cv.text((10, 16), C_TXT,
-            f"stage {snap['stage']}  meshes={len(snap['meshes'])}  drawn {len(drawable)}/{total_vis}vis"
+            f"stage {snap['stage']}  meshes={len(snap['meshes'])}  drawn {len(drawable)}/{total_shown}vis"
             f"  [G {n['ground']}  W {n['wall']}  R {n['roof']}  MoveBG {n_move}]  {ftxt}{cliptxt}")
     mode = _drag["mode"]
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
