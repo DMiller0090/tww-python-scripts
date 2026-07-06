@@ -166,10 +166,11 @@ def _link_pos():
 
 def _link_facing_dir():
     """World-space forward unit vector Link's model points along, from the u16 heading.
-    The raw heading's (sin th, 0, -cos th) points 180deg opposite the visual facing, so negate it."""
+    fwd = (sin th, 0, cos th) — measured live against travel direction: raw 16384 (east) → +X,
+    49152 (west) → -X, 0 (north) → +Z (dot=+1.000 both E/W walks)."""
     raw = struct.unpack(">H", RD.read_bytes(FACING, 2))[0]
     th = raw * (2.0 * math.pi / 65536.0)
-    return (-math.sin(th), 0.0, math.cos(th))
+    return (math.sin(th), 0.0, math.cos(th))
 
 
 _cache = [None]        # last collision snapshot (feeds cache= to reuse static room tables)
