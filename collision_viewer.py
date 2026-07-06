@@ -45,6 +45,12 @@ LINK_X = 0x803D78FC   # three consecutive f32: X, Y, Z
 FACING = 0x803EA3D2   # u16 heading (0x10000 = 360deg). 0=north(-Z), 16384=east(+X), 49152=west(-X)
 # Player-cone dimensions (world units): apex(nose) forward, base back, base radius, lift, segments.
 CONE_NOSE, CONE_BACK, CONE_RADIUS, CONE_LIFT, CONE_SEGS = 70.0, 30.0, 31.0, 28.0, 16
+# HARD per-frame triangle cap — the canvas builds ONE ImGui draw list with 16-bit indices (65535
+# vertex ceiling); filled + wireframe over a whole room can overrun it and CRASH the core. We draw
+# only the nearest N tris (see draw()); wireframe (line-quads) costs far more verts, so its cap is
+# lower. Keep well under the ceiling.
+MAX_DRAW_WIRE = 1100
+MAX_DRAW_FILL = 3200
 
 # --- window / canvas / controls ------------------------------------------------------------
 W, H = 860, 560
@@ -299,6 +305,17 @@ def draw(payload):
 
     drawable.sort(key=lambda t: t[0], reverse=True)   # far first
 
+    # Cap the drawn count so the ImGui draw list can never overflow its 16-bit index buffer and
+    # crash the core. Keep the NEAREST `cap` (they sit at the tail after the far-first sort), still
+    # drawn far-first among themselves. The floor-highlight tri is force-kept so it never drops.
+    total_vis = len(drawable)
+    cap = MAX_DRAW_WIRE if cb_wire.checked else MAX_DRAW_FILL
+    clipped = 0
+    if total_vis > cap:
+        floor_tris = [t for t in drawable[:-cap] if t[5]]   # rescue any highlighted floor tri
+        drawable = floor_tris + drawable[-cap:]
+        clipped = total_vis - len(drawable)
+
     n = {"ground": 0, "wall": 0, "roof": 0}
     for depth, s0, s1, s2, cls, is_floor in drawable:
         n[cls] += 1
@@ -324,9 +341,10 @@ def draw(payload):
 
     floor = snap.get("floor")
     ftxt = f"floor tri {floor[1]} (slot {floor[0]})" if floor else "airborne / no floor"
+    cliptxt = f"  CLIPPED {clipped} (lower Draw radius / zoom in to see all)" if clipped else ""
     cv.text((10, 16), C_TXT,
-            f"stage {snap['stage']}  meshes={len(snap['meshes'])}  drawn {len(drawable)}/{len(tris)}"
-            f"  [G {n['ground']}  W {n['wall']}  R {n['roof']}]  {ftxt}")
+            f"stage {snap['stage']}  meshes={len(snap['meshes'])}  drawn {len(drawable)}/{total_vis}vis"
+            f"  [G {n['ground']}  W {n['wall']}  R {n['roof']}]  {ftxt}{cliptxt}")
     mode = _drag["mode"]
     grab = f"   [{mode.upper()} — click to release]" if mode else ""
     cv.text((10, H-16), C_TXT,
