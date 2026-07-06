@@ -44,7 +44,7 @@ RD = DolphinReader()
 LINK_X = 0x803D78FC   # three consecutive f32: X, Y, Z
 FACING = 0x803EA3D2   # u16 heading (0x10000 = 360deg). 0=north(-Z), 16384=east(+X), 49152=west(-X)
 # Player-cone dimensions (world units): apex(nose) forward, base back, base radius, lift, segments.
-CONE_NOSE, CONE_BACK, CONE_RADIUS, CONE_LIFT, CONE_SEGS = 140.0, 60.0, 62.0, 55.0, 16
+CONE_NOSE, CONE_BACK, CONE_RADIUS, CONE_LIFT, CONE_SEGS = 70.0, 30.0, 31.0, 28.0, 16
 
 # --- window / canvas / controls ------------------------------------------------------------
 W, H = 860, 560
