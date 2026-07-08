@@ -26,8 +26,10 @@ STABILITY: all work (memory read, input, draw) happens on the SINGLE on_frameadv
 on_hostupdate (a second host-thread tick that crashed the core in this build). The view updates
 while the game is RUNNING; a full pause freezes it until the next frame advances.
 """
+import csv
 import heapq
 import math
+import os
 import struct
 
 from dolphin import gui, event, memory
@@ -95,6 +97,171 @@ C_TXT       = 0xFFDDDDDD
 _FILL = {"ground": C_GROUND, "wall": C_WALL, "roof": C_ROOF}
 _SHOW = {"ground": cb_ground, "wall": cb_wall, "roof": cb_roof}
 
+# --- seam-clip overlay --------------------------------------------------------------------------
+# Precomputed clippable seams for the current room (CSV built by
+# tww_sim/harness/collision/export_seam_csv.py -> ww/data/seam_clips/<stage>/Room<N>__room.csv).
+# When "Show Seam Clips (N)" is on, each seam is a clickable dot in the 3D view; clicking one reveals
+# "Initial Position" / "Clip Position" buttons that teleport Link (clean-placement vs raw debug-xyz).
+ROOM_NO_ADDR = 0x803E9F48       # u8 current room number
+PLAYER_PTR   = 0x803AD860       # [ptr] -> daPy_lk_c; the two cXyz pos triples are at +0x10c and +0x120
+POS_OFFS     = (0x10C, 0x120)
+ROLL_STAB_MAX = 49.2202
+_SEAM_DIR = os.path.join(os.path.dirname(__file__), "ww", "data", "seam_clips")
+
+C_CLIP_RS    = 0xFF4CE07A       # roll-stab-reachable seam dot (green)
+C_CLIP_PUSH  = 0xFFFFA83C       # needs-push seam dot (amber)
+C_CLIP_SEL   = 0xFFFFFFFF       # selection ring
+C_HUD_BG     = 0xE01B1E26       # translucent HUD panel background
+C_HUD_BORDER = 0xFF5A6072
+C_BTN        = 0xFF2A6480       # button fill
+C_CHK_ON     = 0xFF4CE0FF       # checkbox tick
+
+_seam = {"stage": None, "room": None, "clips": [], "on": False, "sel": None,
+         "dots": [], "cb_rect": None, "btn": {}}
+
+
+def _room_no():
+    try:
+        return memory.read_bytes(ROOM_NO_ADDR, 1)[0]
+    except Exception:
+        return -1
+
+
+def _load_clips(stage, room):
+    """Load the current room's clippable seams. Falls back to the stage's only room CSV when the
+    exact Room<N> file is absent (single-room stages / boss arenas whose room id differs)."""
+    sdir = os.path.join(_SEAM_DIR, stage)
+    if not os.path.isdir(sdir):
+        return []
+    path = os.path.join(sdir, "Room%d__room.csv" % room)
+    if not os.path.exists(path):
+        rooms = [f for f in os.listdir(sdir) if f.endswith("__room.csv")]
+        if len(rooms) == 1:
+            path = os.path.join(sdir, rooms[0])
+        else:
+            return []
+    out = []
+    try:
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                old = (float(row["init_x"]), float(row["init_y"]), float(row["init_z"]))
+                new = (float(row["dest_x"]), float(row["dest_y"]), float(row["dest_z"]))
+                disp = math.sqrt(sum((a - b) ** 2 for a, b in zip(old, new)))
+                out.append({"S": (float(row["seam_x"]), float(row["seam_y"]), float(row["seam_z"])),
+                            "old": old, "new": new, "ang": float(row["angle_deg"]),
+                            "rollstab": disp <= ROLL_STAB_MAX})
+    except Exception:
+        return []
+    return out
+
+
+def _write_pos(addr, p):
+    memory.write_f32(addr, p[0]); memory.write_f32(addr + 4, p[1]); memory.write_f32(addr + 8, p[2])
+
+
+def _tp_initial(old):
+    """Clean placement (the seam-clip validation method): write BOTH cXyz pos triples AND the debug
+    globals, so the frame's swept CrrPos is zero-length and Link holds at the standable initial spot
+    (a debug-only write can snap him ~100u off across a wall). See DOLPHIN_CONTROL.md."""
+    base = memory.read_u32(PLAYER_PTR) & 0xFFFFFFFF
+    for off in POS_OFFS:
+        _write_pos(base + off, old)
+    _write_pos(LINK_X, old)
+
+
+def _tp_clip(new):
+    """Raw debug-xyz teleport to the clip destination (just the link_x/y/z globals)."""
+    _write_pos(LINK_X, new)
+
+
+def _in(rect, x, y):
+    return rect is not None and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+
+
+def _seam_click(pt):
+    """Consume a canvas click against the seam HUD / dots. Returns True if handled (so it does not
+    also start a camera drag). Checkbox toggles; buttons teleport; a dot selects the nearest seam."""
+    x, y = pt
+    if _in(_seam["cb_rect"], x, y):
+        _seam["on"] = not _seam["on"]
+        if not _seam["on"]:
+            _seam["sel"] = None
+        return True
+    if _seam["on"] and _seam["sel"] is not None:
+        clip = _seam["clips"][_seam["sel"]]
+        if _in(_seam["btn"].get("init"), x, y):
+            _tp_initial(clip["old"]); return True
+        if _in(_seam["btn"].get("clip"), x, y):
+            _tp_clip(clip["new"]); return True
+    if _seam["on"]:
+        best, bd = None, 13 * 13                          # pick the nearest dot within ~13 px
+        for i, sx, sy in _seam["dots"]:
+            d = (sx - x) ** 2 + (sy - y) ** 2
+            if d < bd:
+                bd, best = d, i
+        if best is not None:
+            _seam["sel"] = best
+            return True
+    return False
+
+
+def _border(p0, p1, col):
+    x0, y0 = p0; x1, y1 = p1
+    cv.line((x0, y0), (x1, y0), col, thickness=1); cv.line((x1, y0), (x1, y1), col, thickness=1)
+    cv.line((x1, y1), (x0, y1), col, thickness=1); cv.line((x0, y1), (x0, y0), col, thickness=1)
+
+
+def _button(x, y, label):
+    w, h = 14 + 7 * len(label), 20
+    cv.rect_filled((x, y), (x + w, y + h), C_BTN)
+    _border((x, y), (x + w, y + h), C_HUD_BORDER)
+    cv.text((x + 7, y + 4), 0xFFFFFFFF, label)
+    return (x, y, x + w, y + h)
+
+
+def _draw_seam_ui(oc):
+    """Draw clickable seam dots (when enabled) + the HUD row (checkbox, and, once a seam is selected,
+    the two teleport buttons to its right). Hit-rects are stashed in ``_seam`` for :func:`_seam_click`."""
+    clips = _seam["clips"]
+    _seam["dots"] = []
+    if _seam["on"]:
+        for i, c in enumerate(clips):
+            sp = oc.screen(oc.cam(c["S"]))
+            if not sp or not (0 <= sp[0] <= W and 0 <= sp[1] <= H):
+                continue
+            _seam["dots"].append((i, sp[0], sp[1]))
+            col = C_CLIP_RS if c["rollstab"] else C_CLIP_PUSH
+            sel = (i == _seam["sel"])
+            r = 6 if sel else 4
+            cv.circle_filled(sp, r + 2, C_LINK_HALO)      # dark halo so dots pop over any surface
+            if sel:
+                cv.circle_filled(sp, r + 2, C_CLIP_SEL)   # white selection ring
+            cv.circle_filled(sp, r, col)
+
+    # HUD row: a checkbox with the live clip count, plus teleport buttons when a seam is selected.
+    n = len(clips)
+    bx, by, bs = 12, 40, 15
+    label = "Show Seam Clips (%d)" % n
+    lw = 8 + bs + 6 + 7 * len(label)
+    cv.rect_filled((bx - 6, by - 6), (bx - 6 + lw + 8, by + bs + 8), C_HUD_BG)
+    cv.rect_filled((bx, by), (bx + bs, by + bs), 0xFF20242E)
+    _border((bx, by), (bx + bs, by + bs), C_HUD_BORDER)
+    if _seam["on"]:
+        cv.rect_filled((bx + 3, by + 3), (bx + bs - 3, by + bs - 3), C_CHK_ON)
+    cv.text((bx + bs + 6, by + 2), C_TXT, label)
+    _seam["cb_rect"] = (bx - 6, by - 6, bx - 6 + lw + 8, by + bs + 8)
+
+    _seam["btn"] = {}
+    if _seam["on"] and _seam["sel"] is not None and 0 <= _seam["sel"] < n:
+        rx = bx - 6 + lw + 8 + 12
+        _seam["btn"]["init"] = _button(rx, by - 3, "Initial Position")
+        _seam["btn"]["clip"] = _button(_seam["btn"]["init"][2] + 8, by - 3, "Clip Position")
+        c = clips[_seam["sel"]]
+        cv.text((bx, by + bs + 10), C_TXT,
+                "seam (%.0f, %.0f, %.0f)   angle %.1f   %s"
+                % (c["S"][0], c["S"][1], c["S"][2], c["ang"],
+                   "roll-stab reachable" if c["rollstab"] else "needs push"))
+
 
 def _sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
 def _cross(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
@@ -144,6 +311,8 @@ def _apply_input():
         _view["zoom"] += w
     mx, my, inside = cv.mouse_pos()
     click = cv.take_click()
+    if click is not None and _seam_click(click):
+        click = None                                     # consumed by the seam HUD / a dot
     rclick = cv.take_right_click()
 
     def _start(mode, at):
@@ -379,6 +548,8 @@ def draw(payload):
             cv.circle_filled(ls, 9, C_LINK_HALO)
             cv.circle_filled(ls, 6, C_LINK)
 
+    _draw_seam_ui(oc)
+
     floor = snap.get("floor")
     ftxt = f"floor tri {floor[1]} (slot {floor[0]})" if floor else "airborne / no floor"
     cliptxt = f"  CLIPPED {clipped} (lower Draw radius / zoom in to see all)" if clipped else ""
@@ -398,6 +569,11 @@ def on_frame():
     try:
         snap = read_collision(RD, cache=_cache[0])
         _cache[0] = snap
+        stg, rm = snap["stage"], _room_no()
+        if (stg, rm) != (_seam["stage"], _seam["room"]):
+            _seam["stage"], _seam["room"] = stg, rm
+            _seam["clips"] = _load_clips(stg, rm)
+            _seam["sel"] = None
         link = _link_pos()
         try:
             fwd = _link_facing_dir()
