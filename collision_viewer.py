@@ -116,6 +116,21 @@ C_HUD_BORDER = 0xFF5A6072
 C_BTN        = 0xFF2A6480       # button fill
 C_CHK_ON     = 0xFF4CE0FF       # checkbox tick
 
+# Teleport buttons are a FIXED size, so labels of different lengths never resize the box and the
+# label offset stays stable. Tune these: box size, then the label's x/y offset from the box
+# top-left (canvas text() y is the BASELINE, so BTN_TY is measured near the bottom edge).
+BTN_W, BTN_H = 132, 22
+BTN_TX, BTN_TY = 26.0, 15.0
+
+# "Show Seam Clips (N)" checkbox: box top-left (CHK_X, CHK_Y), box size (CHK_BOX), and the label's
+# offset from that top-left (CHK_TX, CHK_TY). canvas text() y is the BASELINE, so CHK_TY is measured
+# down from the box top.
+CHK_X, CHK_Y, CHK_BOX = 12, 40, 15
+CHK_TX, CHK_TY = 21.0, 12.0
+# Selected-seam info line ("seam (x,y,z) ... angle ... roll-stab/needs push"): text position
+# (INFO_X, INFO_Y); y is the BASELINE.
+INFO_X, INFO_Y = 12.0, 85.0
+
 _seam = {"stage": None, "room": None, "clips": [], "on": False, "sel": None,
          "dots": [], "cb_rect": None, "btn": {}}
 
@@ -212,14 +227,12 @@ def _border(p0, p1, col):
 
 
 def _button(x, y, label):
-    # canvas text() takes (left, BASELINE); center the label in both axes (baseline sits ~6px above
-    # the bottom edge so the glyphs land in the vertical middle, not floating over the top).
-    tw = len(label) * 7.5
-    w, h = int(tw) + 18, 22
-    cv.rect_filled((x, y), (x + w, y + h), C_BTN)
-    _border((x, y), (x + w, y + h), C_HUD_BORDER)
-    cv.text((x + (w - tw) / 2.0, y + h - 6.0), 0xFFFFFFFF, label)
-    return (x, y, x + w, y + h)
+    # FIXED size (BTN_W x BTN_H); the label sits at a fixed (BTN_TX, BTN_TY) offset so it never moves
+    # when the text length changes. canvas text() y is the BASELINE.
+    cv.rect_filled((x, y), (x + BTN_W, y + BTN_H), C_BTN)
+    _border((x, y), (x + BTN_W, y + BTN_H), C_HUD_BORDER)
+    cv.text((x + BTN_TX, y + BTN_TY), 0xFFFFFFFF, label)
+    return (x, y, x + BTN_W, y + BTN_H)
 
 
 def _draw_seam_ui(oc):
@@ -241,9 +254,10 @@ def _draw_seam_ui(oc):
                 cv.circle_filled(sp, r + 2, C_CLIP_SEL)   # white selection ring
             cv.circle_filled(sp, r, col)
 
-    # HUD row: a checkbox with the live clip count, plus teleport buttons when a seam is selected.
+    # HUD: "Show Seam Clips (N)" checkbox (position/label via CHK_*), plus the teleport buttons and
+    # the selected-seam info line (position via INFO_*) when a seam dot is selected.
     n = len(clips)
-    bx, by, bs = 12, 40, 15
+    bx, by, bs = CHK_X, CHK_Y, CHK_BOX
     label = "Show Seam Clips (%d)" % n
     lw = 8 + bs + 6 + 7 * len(label)
     cv.rect_filled((bx - 6, by - 6), (bx - 6 + lw + 8, by + bs + 8), C_HUD_BG)
@@ -251,7 +265,7 @@ def _draw_seam_ui(oc):
     _border((bx, by), (bx + bs, by + bs), C_HUD_BORDER)
     if _seam["on"]:
         cv.rect_filled((bx + 3, by + 3), (bx + bs - 3, by + bs - 3), C_CHK_ON)
-    cv.text((bx + bs + 6, by + 2), C_TXT, label)
+    cv.text((bx + CHK_TX, by + CHK_TY), C_TXT, label)
     _seam["cb_rect"] = (bx - 6, by - 6, bx - 6 + lw + 8, by + bs + 8)
 
     _seam["btn"] = {}
@@ -260,7 +274,7 @@ def _draw_seam_ui(oc):
         _seam["btn"]["init"] = _button(rx, by - 3, "Initial Position")
         _seam["btn"]["clip"] = _button(_seam["btn"]["init"][2] + 8, by - 3, "Clip Position")
         c = clips[_seam["sel"]]
-        cv.text((bx, by + bs + 10), C_TXT,
+        cv.text((INFO_X, INFO_Y), C_TXT,
                 "seam (%.0f, %.0f, %.0f)   angle %.1f   %s"
                 % (c["S"][0], c["S"][1], c["S"][2], c["ang"],
                    "roll-stab reachable" if c["rollstab"] else "needs push"))
