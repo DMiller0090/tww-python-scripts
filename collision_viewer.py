@@ -212,10 +212,13 @@ def _border(p0, p1, col):
 
 
 def _button(x, y, label):
-    w, h = 14 + 7 * len(label), 20
+    # canvas text() takes (left, BASELINE); center the label in both axes (baseline sits ~6px above
+    # the bottom edge so the glyphs land in the vertical middle, not floating over the top).
+    tw = len(label) * 7.5
+    w, h = int(tw) + 18, 22
     cv.rect_filled((x, y), (x + w, y + h), C_BTN)
     _border((x, y), (x + w, y + h), C_HUD_BORDER)
-    cv.text((x + 7, y + 4), 0xFFFFFFFF, label)
+    cv.text((x + (w - tw) / 2.0, y + h - 6.0), 0xFFFFFFFF, label)
     return (x, y, x + w, y + h)
 
 
