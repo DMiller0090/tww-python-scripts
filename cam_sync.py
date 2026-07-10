@@ -28,22 +28,30 @@ FULL_DEFLECT_MIN = 0.98          # stick_dist threshold for "full deflection" (m
 
 
 def _candidate_table_dirs():
-    """Directories that might hold the superswim data tables, best first."""
+    """Directories that might hold the sim data tables, best first.
+
+    The `superswim` repo was renamed to `tww_sim` in the 2026-07-04 restructure
+    and its package repackaged into tww_sim/{core,swim,land}, so the tables now
+    live at tww_sim/tww_sim/core/tables/. We search the new layout first and keep
+    the old superswim paths as a fallback for un-migrated checkouts."""
     dirs = []
-    # 1) the sibling `superswim` repo's package dir, found by walking up from this script.
-    #    cwd-immune, and the one mechanism that works inside Dolphin's embedded interpreter
-    #    (which can't see the system-Python editable install).
+    # 1) the sibling repo's package `tables` dir, found by walking up from this
+    #    script. cwd-immune, and the one mechanism that works inside Dolphin's
+    #    embedded interpreter (which can't see the system-Python editable install).
     cur = _HERE
     for _ in range(6):
-        dirs.append(os.path.join(cur, "superswim", "superswim", "tables"))
+        dirs.append(os.path.join(cur, "tww_sim", "tww_sim", "core", "tables"))  # new layout
+        dirs.append(os.path.join(cur, "superswim", "superswim", "tables"))      # legacy layout
         cur = os.path.dirname(cur)
-    # 2) the installed `superswim` package, if the running interpreter can import it.
+    # 2) the installed package, if the running interpreter can import it.
     try:
         import importlib.util
-        spec = importlib.util.find_spec("superswim")
-        for loc in (spec.submodule_search_locations or []) if spec else []:
-            dirs.append(os.path.join(loc, "tables"))
-            dirs.append(os.path.join(loc, "superswim", "tables"))
+        for pkg in ("tww_sim", "superswim"):
+            spec = importlib.util.find_spec(pkg)
+            for loc in (spec.submodule_search_locations or []) if spec else []:
+                dirs.append(os.path.join(loc, "core", "tables"))    # tww_sim layout
+                dirs.append(os.path.join(loc, "tables"))            # legacy layout
+                dirs.append(os.path.join(loc, pkg, "tables"))       # legacy nested layout
     except Exception:
         pass
     # 3) legacy: the old drop in the project root (parent of the scripts dir).
