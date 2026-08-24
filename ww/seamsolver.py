@@ -78,13 +78,16 @@ def gate(disp, dist_to_seam, const=None):
     ceiling = reach * (1.0 + c["reach_rel_eps"])
     near, far = c["min_approach_walk"], c["max_approach_walk"]
     blocked, warn = [], []
+    # The seam's own displacement NEVER blocks. The locator banks an existence pair, not the
+    # minimum, so refusing on it would call a seam infeasible from a number that never claimed to be.
     if disp is not None and disp > ceiling:
         if disp <= c["roll_lunge"] * (1.0 + c["reach_rel_eps"]):
-            blocked.append(("roll_tier", "needs the roll tier (%.3fu > walk lunge %.3fu)"
-                            % (disp, reach)))
+            warn.append(("roll_tier", "the banked pair needs %.3fu (> walk lunge %.3fu), roll-tier "
+                         "depth" % (disp, reach)))
         else:
-            blocked.append(("too_deep", "clip needs %.3fu, past even the roll lunge %.3fu"
-                            % (disp, c["roll_lunge"])))
+            warn.append(("deeper_than_lunge", "the banked pair needs %.3fu, past even the roll "
+                         "lunge %.3fu -- but it is an existence pair, not the minimum"
+                         % (disp, c["roll_lunge"])))
     if dist_to_seam is not None and dist_to_seam < near:
         blocked.append(("too_close", "Link is %.0fu away; needs %.0fu to reach the walk cap and "
                         "still fire the lunge" % (dist_to_seam, near)))
@@ -98,15 +101,25 @@ def gate(disp, dist_to_seam, const=None):
 
 
 def summary(verdict):
-    """One line for the viewer's HUD."""
+    """One line for the viewer's HUD. Notes are shown even when nothing blocks, because the ones
+    this gate raises are about the seam being unusual rather than about it being unusable."""
     if verdict["ok"]:
-        return "clip reachable: %.2fu at %.0fu away" % (verdict["disp"] or 0.0, verdict["dist"] or 0.0)
+        line = "in range: %.2fu pair at %.0fu away" % (verdict["disp"] or 0.0,
+                                                       verdict["dist"] or 0.0)
+        if verdict["warnings"]:
+            line += "  (note: " + "; ".join(m for _c, m in verdict["warnings"]) + ")"
+        return line
     return "; ".join(m for _c, m in verdict["blocked"])
 
 
 def _slug(stage, room, seam):
+    """Must match `harness.seamui.handoff.slug` exactly, or the host tool files this seam's
+    artefacts under a key the viewer never asks for again.
+
+    XZ only: a seam is a vertical edge and the two sources name different points on it -- this CSV
+    carries the standable floor Y, the DZB enumeration the wall-base vertex."""
     import hashlib
-    raw = json.dumps([float(c) for c in seam], sort_keys=True).encode()
+    raw = json.dumps([float(seam[0]), float(seam[2])], sort_keys=True).encode()
     return "%s_r%d_%s" % (str(stage).replace(os.sep, "_"), int(room),
                           hashlib.sha1(raw).hexdigest()[:8])
 
