@@ -11,6 +11,7 @@ from array import array
 
 from dolphin import debug, event, gui, memory
 
+from ww import seamsolver
 from ww.actor import proc_name
 from ww.addresses.address import Address
 from ww.collision_geo import read_collision
@@ -216,6 +217,8 @@ cb_zone_info = panel.checkbox("Zone / room info", False, group="Actor Tools")
 cb_seams = panel.checkbox("Show Seam Clips", False, group="Seam Clips")
 seam_initial_button = panel.button("Teleport seam initial", group="Seam Clips")
 seam_clip_button = panel.button("Teleport seam clip", group="Seam Clips")
+seam_solve_button = panel.button("Find slash clip here", group="Seam Clips")
+seam_solve_status = panel.text("Select a seam to check reach.", group="Seam Clips")
 status = panel.text("Waiting for TWW collision...", group="Tools")
 
 _cache = None
@@ -298,6 +301,8 @@ _status_summary_last = None
 _seams = {"stage": None, "room": None, "clips": [], "selected": None}
 _selected_face = None
 _selected_point = None
+_seam_gate = {"key": None, "verdict": None, "line": ""}
+_seam_launch = ""
 
 
 def _sub(a, b):
@@ -1105,6 +1110,79 @@ def _seam_selection():
     return clips[index] if index is not None and 0 <= index < len(clips) else None
 
 
+def _seam_displacement(clip):
+    a, b = clip["initial"], clip["destination"]
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def _link_to_seam(clip):
+    """Link's XZ distance to the seam vertex, or None if Link is unreadable."""
+    if _link is None:
+        return None
+    point = clip["point"]
+    return math.sqrt((_link[0] - point[0]) ** 2 + (_link[2] - point[2]) ** 2)
+
+
+def _refresh_seam_gate():
+    """Recompute the reach verdict for the selected seam.
+
+    Cheap (arithmetic over exported constants) but keyed on a rounded Link position so the status
+    text is not rewritten every frame while he walks."""
+    clip = _seam_selection()
+    if clip is None:
+        if _seam_gate["key"] is not None:
+            _seam_gate.update(key=None, verdict=None, line="")
+            seam_solve_status.set("Select a seam to check reach.")
+        return
+    distance = _link_to_seam(clip)
+    key = (_seams["selected"], None if distance is None else round(distance, 1))
+    if key == _seam_gate["key"]:
+        return
+    verdict = seamsolver.gate(_seam_displacement(clip), distance)
+    line = seamsolver.summary(verdict)
+    _seam_gate.update(key=key, verdict=verdict, line=line)
+    seam_solve_status.set(("READY - " if verdict["ok"] else "BLOCKED - ") + line
+                          + (("  |  " + _seam_launch) if _seam_launch else ""))
+
+
+def _launch_seam_solver():
+    """Write the handoff and spawn the host-side solver window.
+
+    Refuses when the gate refuses, so the reason is visible here rather than in a window that
+    opens only to say no."""
+    global _seam_launch
+    clip = _seam_selection()
+    if clip is None:
+        _seam_launch = "no seam selected"
+        return
+    if _seams["stage"] is None or _seams["room"] is None:
+        _seam_launch = "no stage loaded"
+        return
+    verdict = _seam_gate.get("verdict")
+    if verdict is not None and not verdict["ok"]:
+        _seam_launch = "not launched: " + seamsolver.summary(verdict)
+        _seam_gate["key"] = None
+        return
+    link = None
+    if _link is not None:
+        # Position only. The solver reads Link's full state off live RAM itself, at full
+        # precision through named addresses, rather than trusting a copy that travelled as text.
+        try:
+            room = _read_room()
+        except Exception:
+            room = None
+        link = {"x": _link[0], "y": _link[1], "z": _link[2], "room": room}
+    payload = seamsolver.build_handoff(
+        _seams["stage"], _seams["room"], clip["point"], clip["initial"], clip["destination"],
+        angle_deg=clip.get("angle"), link=link, gate_result=verdict)
+    try:
+        path, pid = seamsolver.launch(payload)
+        _seam_launch = "launched pid %s -> %s" % (pid, os.path.basename(path))
+    except Exception as exc:
+        _seam_launch = "launch failed: %s" % exc
+    _seam_gate["key"] = None
+
+
 def _apply_input():
     global _cache, _hardware_mesh_key, _hardware_dynamic_key, _hardware_state_key
     global _viewer_fullscreen, _clean_capture, _fullscreen_before_capture
@@ -1136,6 +1214,9 @@ def _apply_input():
         _teleport_initial(clip)
     if clip is not None and seam_clip_button.clicked:
         _teleport_destination(clip)
+    if seam_solve_button.clicked:
+        _launch_seam_solver()
+    _refresh_seam_gate()
     if cb_follow_cam.checked:
         _mouse_look["active"] = False
         return changed
@@ -2054,6 +2135,7 @@ def _update_overlay_text(camera):
            tuple(sorted((actor, lock["position"]) for actor, lock in _move_actor_locks.items())),
            cb_coordinate_dot.checked, _link, camera.position, camera.right, camera.up, camera.forward,
            None if clip is None else (clip["point"], clip["angle"], clip["rollstab"]),
+           _seam_gate["line"],
            _normal_xyz_text(_selected_face) if _selected_face is not None else None,
            _normal_angle_lines(_selected_face) if _selected_face is not None else None,
            selected_point)
@@ -2085,6 +2167,10 @@ def _update_overlay_text(camera):
                 hud.text((18, 94), text, "Seam: %.2f, %.2f, %.2f" % clip["point"])
                 hud.text((18, 116), text, "Angle: %.2f deg  %s" %
                          (clip["angle"], "roll-stab reachable" if clip["rollstab"] else "needs push"))
+                if _seam_gate["line"]:
+                    ok = _seam_gate["verdict"] is not None and _seam_gate["verdict"]["ok"]
+                    hud.text((18, 138), 0xFF7CE38B if ok else 0xFFFF8A80,
+                             ("Slash clip: " if ok else "Slash clip blocked: ") + _seam_gate["line"])
 
         # Vertex Select is a Qt only mode switch. Its canvas HUD is drawn only
         # while that switch is enabled, keeping the normal TWW view uncluttered.
@@ -2207,7 +2293,7 @@ def _pick_seam(camera, click):
         if clip is not None:
             _teleport_destination(clip)
         return True
-    if cb_seams.checked and 8 <= click[0] <= 610 and 44 <= click[1] <= 140:
+    if cb_seams.checked and 8 <= click[0] <= 610 and 44 <= click[1] <= 158:
         return True
     if not cb_seams.checked:
         return False

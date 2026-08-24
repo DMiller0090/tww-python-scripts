@@ -1,0 +1,13 @@
+{
+ "default_ramp": 39.6085410156251,
+ "generated_by": "harness.seamui.reach.export",
+ "max_approach_walk": 782.0,
+ "max_plan_frames": 46,
+ "min_approach_walk": 79.82878710929998,
+ "reach_rel_eps": 2.384185791015625e-07,
+ "roll_cap": 26.0,
+ "roll_lunge": 49.22022573158013,
+ "version": 1,
+ "walk_cap": 17.0,
+ "walk_lunge": 40.220246093674874
+}
