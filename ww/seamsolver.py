@@ -28,7 +28,7 @@ FALLBACK = {
     "walk_lunge": 40.220246093674874,
     "roll_lunge": 49.22022573158013,
     "walk_cap": 17.0,
-    "min_approach_walk": 79.82878710929998,
+    "min_approach_walk": 79.19654394523742,
     "max_approach_walk": 782.0,
     "reach_rel_eps": 2.384185791015625e-07,
 }
@@ -142,11 +142,30 @@ def _find_python(cfg):
     launcher, then PATH -- and the host tool re-checks the build itself, so a wrong guess here
     surfaces as a readable 'not built for this interpreter' rather than a crash."""
     if cfg.get("python"):
-        return cfg["python"]
+        return _windowless(cfg["python"])
     for cand in (os.environ.get("TWW_SIM_PYTHON"), "py", "python"):
         if cand:
-            return cand
+            return _windowless(cand)
     return "python"
+
+
+def _windowless(exe):
+    """`pythonw.exe` beside a given `python.exe`, when there is one.
+
+    The window is a GUI and must not drag a console along behind it. DETACHED_PROCESS already
+    denies it one, but a console-subsystem host still owns a console handle the moment anything
+    asks for it, so the windowless build is the honest host. Stages the window runs go the other
+    way on purpose -- they talk on stdout -- and suppress their console with a flag instead."""
+    if os.name != "nt" or not exe:
+        return exe
+    base = os.path.basename(exe).lower()
+    if base in ("py", "py.exe"):
+        return exe                       # the launcher picks the host; -3.7 is added by the caller
+    if base == "python.exe" and os.path.isabs(exe):
+        w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(w):
+            return w
+    return exe
 
 
 def launch(payload, cfg=None):
