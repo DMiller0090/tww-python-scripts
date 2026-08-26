@@ -1,13 +1,20 @@
 {
  "default_ramp": 38.97629785156255,
  "generated_by": "harness.seamui.reach.export",
+ "max_approach_roll": 2029.2201837699877,
  "max_approach_walk": 782.0,
  "max_plan_frames": 46,
+ "min_approach_roll": 538.1964816215503,
  "min_approach_walk": 79.19654394523742,
  "reach_rel_eps": 2.384185791015625e-07,
+ "roll_aim_frames": 15,
  "roll_cap": 26.0,
+ "roll_frames": 16,
+ "roll_latency": 34.0,
  "roll_lunge": 49.22022573158013,
- "version": 1,
+ "roll_tail": 499.2201837699878,
+ "roll_travel": 416.0,
+ "version": 2,
  "walk_cap": 17.0,
  "walk_lunge": 40.220246093674874
 }

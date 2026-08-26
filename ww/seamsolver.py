@@ -30,6 +30,8 @@ FALLBACK = {
     "walk_cap": 17.0,
     "min_approach_walk": 79.19654394523742,
     "max_approach_walk": 782.0,
+    "min_approach_roll": 538.1964816215503,
+    "roll_travel": 416.0,
     "reach_rel_eps": 2.384185791015625e-07,
 }
 
@@ -82,8 +84,16 @@ def gate(disp, dist_to_seam, const=None):
     # minimum, so refusing on it would call a seam infeasible from a number that never claimed to be.
     if disp is not None and disp > ceiling:
         if disp <= c["roll_lunge"] * (1.0 + c["reach_rel_eps"]):
-            warn.append(("roll_tier", "the banked pair needs %.3fu (> walk lunge %.3fu), roll-tier "
-                         "depth" % (disp, reach)))
+            # Roll-tier depth is not a refusal -- the host tool plans that tier too. But a roll
+            # needs 6.6x the run-up a walk does, almost all of it the 416u the roll itself
+            # covers, so say whether Link has the room BEFORE spawning a window to say it.
+            msg = ("the banked pair needs %.3fu (> walk lunge %.3fu), roll-tier depth"
+                   % (disp, reach))
+            roll_near = c.get("min_approach_roll")
+            if roll_near is not None and dist_to_seam is not None and dist_to_seam < roll_near:
+                msg += ("; a roll needs %.0fu of run-up and Link has %.0fu"
+                        % (roll_near, dist_to_seam))
+            warn.append(("roll_tier", msg))
         else:
             warn.append(("deeper_than_lunge", "the banked pair needs %.3fu, past even the roll "
                          "lunge %.3fu -- but it is an existence pair, not the minimum"
