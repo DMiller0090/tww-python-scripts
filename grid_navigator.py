@@ -15,8 +15,8 @@ opens zoomed in much further than ss_navigator.
 
 - Scroll to zoom (toward the cursor). No panning — zoom out to see more.
 - Click the grid to set a target; or snap it to Link with the button.
-- Frame advance reads live state and drives the stick; host updates own all
-  input and drawing, so the view stays live while emulation is paused.
+- Frame advance handles live state, movement, and drawing. Host updates redraw
+  cached state while emulation is paused without touching game memory.
 """
 from __future__ import annotations
 import math
@@ -355,13 +355,9 @@ def _update_view() -> None:
 
 @event.on_frameadvance
 def on_frameadvance() -> None:
-    """Refresh live state, then apply movement for this frame.
-
-    Drawing and input stay OFF the emu thread: _update_view() consumes one-shot
-    canvas events and rebuilds the canvas non-atomically, so running it here too
-    would race the host thread and could commit a half-built frame.
-    """
+    """Refresh live state, process UI, then apply movement for this frame."""
     _read_state()
+    _update_view()
     if _armed and _dest_set and _have_state:
         try:
             _drive_toward(_cur_x, _cur_z)

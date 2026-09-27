@@ -1,17 +1,16 @@
 # ss_navigator.py
 """
-Superswim Navigator — shows where Link is on the Great Sea, which way he is
-facing, and projects the expected superswim path toward a clicked destination.
+Superswim Navigator — shows Link in world coordinates in any stage, which way
+he is facing, and projects the expected superswim path toward a destination.
 - Scroll to zoom. Click the map to set a destination.
-- Drawing/input run on on_hostupdate so the map stays live while paused;
-  on_frameadvance owns memory reads and the charge.
+- Driven by on_hostupdate so it stays live while the game is paused.
 """
 from __future__ import annotations
 import math
 import os
 import sys
 from typing import Optional, Tuple
-from dolphin import event, gui, controller, memory
+from dolphin import event, gui, controller
 from ww import mathutils, game
 from ww.actors.player import Player
 from ww.mathutils import deg_to_halfword, wrap_deg
@@ -38,7 +37,6 @@ SS_SPEED                = 7000.0
 OFFSET_DEG        = 90    # 90 = charge axis perpendicular to the dest bearing (arrow-swim toward it)
 ARROW_SWIM_DEG    = 0     # drift tilt toward the dest (0 = pure charge, no drift)
 CAM_PREDICT_STEPS = 1     # 1 = predict next-frame csangle; 0 reproduces the old stale read
-FACING_ADDR       = 0x803EA3D2   # shape_angle.y (u16) -- the facing the reorient snap operates on
 _ARROW_HW         = int(round(ARROW_SWIM_DEG * 65536 / 360.0))
 
 # Minimum turn (deg) to accept a turnaround as a DIRECT charge snap; below it we reorient.
@@ -357,9 +355,6 @@ _chg_target: int = 0        # current commanded world facing target (also HUD)
 _chg_phase: str = ""        # HUD: current charge phase
 _anim: int = 0              # host-side frame tick for canvas animation (swim ping / pill blink)
 
-SEA_STAGE = "sea"
-
-
 def _set_main(sx: float, sy: float) -> None:
     inp = controller.get_gc_buttons(0)
     inp["StickX"] = max(0, min(int(sx), 255))
@@ -372,7 +367,7 @@ def _reset_charge() -> None:
     _chg_active = False
 
 
-def _run_charge(cur_x: float, cur_z: float) -> None:
+def _run_charge(cur_x: float, cur_z: float, facing_hw: int) -> None:
     """Drive the main stick to charge the superswim, validating every turnaround.
 
     Emu-thread only (memory + controller live here). The PLAN advances once per GAME frame
@@ -412,7 +407,10 @@ def _run_charge(cur_x: float, cur_z: float) -> None:
     if (not _chg_active) or key != _chg_key:
         _chg_key = key
         _chg_active = True
-        _chg_expected = memory.read_u16(FACING_ADDR) & 0xFFFF
+        # Player.angle_y follows the current player actor across stage loads.
+        # An absolute actor address is only accidentally stable and can point
+        # at stale data while transitioning between non-sea stages.
+        _chg_expected = int(facing_hw) & 0xFFFF
         if _angle_mode:
             _chg_goal = _chg_expected
         _chg_last_frame = None
@@ -492,11 +490,10 @@ def _read_state() -> None:
 
     # Drive the superswim charge here on the emu thread (memory + controller must live on
     # the emu thread, same as the standalone ss_charge_* scripts did via on_frameadvance).
-    # Arrow-swim needs a destination; "swim at current angle" only needs Link on the sea.
-    on_sea = _current_stage == SEA_STAGE
-    if _have_state and _armed and on_sea and (_angle_mode or _dest_set):
+    # The charge mechanics and camera de-rotation are stage-independent.
+    if _have_state and _armed and (_angle_mode or _dest_set):
         try:
-            _run_charge(_cur_x, _cur_z)
+            _run_charge(_cur_x, _cur_z, _facing_hw)
         except Exception:
             _reset_charge()
     else:
@@ -511,7 +508,6 @@ def _update_canvas() -> None:
     cur_x = _cur_x
     cur_z = _cur_z
     facing_hw: Optional[int] = _facing_hw
-    on_sea = _current_stage == SEA_STAGE
     have = _have_state
 
     # Mutual exclusion: the two mode checkboxes can't both be on. If both read checked,
@@ -560,7 +556,7 @@ def _update_canvas() -> None:
         _cal_shown = _chk_cal.checked
         _set_calibration_visible(_cal_shown)
 
-    if have and on_sea:
+    if have:
         # ── button: snap destination to Link's current position ───
         if _btn_here.clicked:
             _dest_x, _dest_z = cur_x, cur_z
@@ -585,7 +581,7 @@ def _update_canvas() -> None:
 
     # Charging this frame? Mirror the emu-thread gate (in _read_state) so the on-canvas
     # swim indicator matches when the controller is actually being driven.
-    charging = bool(_armed and have and on_sea and (_angle_mode or _dest_set))
+    charging = bool(_armed and have and (_angle_mode or _dest_set))
     _reorienting = charging and _chg_phase.startswith("REORIENT")
     _swim_rgb = (C_REORI if _reorienting else C_SWIM) & 0x00FFFFFF
 
@@ -612,7 +608,7 @@ def _update_canvas() -> None:
             _canvas.line((ax - 5 * sx, ay - 5 * sy), (ax - 5 * sx + cl * sx, ay - 5 * sy), C_CORNER, 2.5)
             _canvas.line((ax - 5 * sx, ay - 5 * sy), (ax - 5 * sx, ay - 5 * sy + cl * sy), C_CORNER, 2.5)
 
-    if have and on_sea:
+    if have:
         # Link dot + facing arrow
         lx, ly = w2c(cur_x, cur_z)
         # swim indicator: two staggered sonar pings expanding from Link + a coloured ring,
@@ -650,27 +646,6 @@ def _update_canvas() -> None:
                 for pt in cpts[1:]:
                     _canvas.circle_filled(pt, 2, C_PROJ)
 
-    # ── "waiting for sea" overlay (drawn on top of the dimmed map) ──
-    if not on_sea:
-        _canvas.rect_filled((0.0, 0.0), (cw, ch), 0xBB000000)
-        stage_label = _current_stage if _current_stage else "—"
-        # canvas text() has no font-size; draw at multiple offsets for a bolder look
-        label1 = "Waiting for Sea..."
-        label2 = f"stage: {stage_label}"
-        # ~7.5px per char at default font size; scale offsets to simulate larger text
-        hw1 = len(label1) * 7.5 / 2.0
-        hw2 = len(label2) * 7.5 / 2.0
-        tx1 = cw / 2.0 - hw1
-        ty1 = ch / 2.0 - 18.0
-        tx2 = cw / 2.0 - hw2
-        ty2 = ch / 2.0 + 10.0
-        # draw heading text with 2-px shadow offsets to simulate larger/bolder
-        for ox, oy in ((2, 2), (1, 2), (2, 1)):
-            _canvas.text((tx1 + ox, ty1 + oy), 0xFF000000, label1)
-        for ox, oy in ((0, 0), (1, 0), (0, 1), (1, 1)):
-            _canvas.text((tx1 + ox, ty1 + oy), 0xFFFFFFFF, label1)
-        _canvas.text((tx2, ty2), 0xFF888899, label2)
-
     # ── swim status pill (top-left of the canvas; fixed size, never resizes the window) ──
     if charging:
         label = _chg_phase or "SWIM"
@@ -689,27 +664,22 @@ def _update_canvas() -> None:
     # ── status line (native widget below the map) ─────────────────
     # NOTE: charge state is shown ON the canvas (pill + ping) on purpose -- appending it
     # here lengthened the QLabel and grew the whole window. Keep this line fixed-width-ish.
-    if not on_sea:
-        _status.set(f"Not on Great Sea  (stage: {_current_stage or '—'})")
-    elif _dest_set and have:
+    if _dest_set and have:
         atd = mathutils.angle2d_hw(cur_x, cur_z, _dest_x, _dest_z)
         qd  = mathutils.dist2d(cur_x, cur_z, _dest_x, _dest_z) / 100_000.0
-        _status.set(f"Dest  X={_dest_x:.0f}  Z={_dest_z:.0f}     "
+        _status.set(f"{_current_stage or '?'}  Dest X={_dest_x:.0f}  Z={_dest_z:.0f}     "
                     f"Angle to dest={atd}     Quadrants={qd:.4f}")
+    elif not have:
+        _status.set(f"Waiting for Link  (stage: {_current_stage or '—'})")
     else:
-        _status.set("Click the map to set a destination")
+        _status.set(f"{_current_stage or '?'}  Click the map to set a destination")
 
 
 @event.on_frameadvance
 def on_frameadvance() -> None:
-    """Refresh game state (and run the charge) once per emulated frame.
-
-    _update_canvas() is deliberately NOT called here. It owns the two mode
-    checkboxes' edge-triggered mutual exclusion, which reads and writes
-    _dest_prev/_angle_prev; running it from both threads let one tick observe
-    the other's half-applied flip and clear BOTH boxes, silently disarming.
-    """
+    """Refresh game state and the canvas once per emulated frame."""
     _read_state()
+    _update_canvas()
 
 
 @event.on_hostupdate
