@@ -8,22 +8,43 @@ import json
 import math
 import os
 import struct
+import sys
+import textwrap
 from array import array
 
-from dolphin import debug, event, gui, memory
+# On Windows the fork adds this Scripts folder to Python's module path; the macOS/Linux build does not,
+# so `import ww` fails there. Put the folder this script lives in on sys.path ourselves.
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
+from dolphin import debug, event, gui, memory, registers
 
 from ww.actor import proc_name
 from ww.addresses.address import Address
 from ww.collider import (ColliderDecoder, attack_info as _collider_attack_info,
                          attack_type_names as _attack_type_names, finite_vec as _finite_vec,
                          target_type_name as _target_type_names, u16 as _u16, u32 as _u32,
+                         physical_collision_name as _physical_collision_name,
                          valid_ptr as _valid_ptr, vec3 as _vec3)
 from ww.collision_geo import read_collision
-from ww.cull import read_camera
+from ww.collision_tools import (FIELDS as TRIANGLE_FIELDS, decode_properties, inspect_triangle,
+                                write_triangle_property, read_link_ground_query, ground_candidates,
+                                exit_projection_cells, exit_slice_polygons, height as _plane_height)
+from ww.collider_edit import ColliderEdits, ray_hit as _ray_collider_hit
+from ww.cull import read_camera, full_snapshot as read_cull_snapshot
+from ww.zone_info import read_zone_tables
+from ww.actor_switches import actor_switches
 from ww.viewer_math import (ViewerCamera, add_scaled as _add_scaled,
                             angles_from_forward as _angles_from_forward, cross as _cross,
                             dot as _dot, forward_from_angles as _forward_from_angles,
                             normalize as _norm, screen_ray as _screen_ray, sub as _sub)
+from ww.soft_canvas import SoftCanvas
+
+# "auto": hardware (GPU) canvas on Windows, CPU-canvas software renderer on macOS/other.
+# The hardware canvas is Direct3D 11 on Windows builds of the fork. Use "hardware" to try the
+# fork's OpenGL path on a Mac, or "software" to force the CPU renderer anywhere.
+RENDER_MODE = "auto"
 
 
 class DolphinReader:
@@ -33,6 +54,12 @@ class DolphinReader:
 
 RD = DolphinReader()
 COLLIDER_DECODER = ColliderDecoder(RD, memory.read_u32)
+COLLIDER_EDITS = ColliderEdits(memory, COLLIDER_DECODER, allow_ownerless=True)
+
+
+def _decode_collider(address, data=None):
+    data = RD.read_bytes(address, 0x150) if data is None else data
+    return COLLIDER_EDITS.track(address, data, COLLIDER_DECODER.decode(data))
 
 
 def _address(name, jp_fallback):
@@ -117,7 +144,7 @@ OTHER_TRIGGER_PROCS = {PROC_TAG_SO, PROC_TAG_ISLAND}
 SEAM_DIR = os.path.join(os.path.dirname(__file__), "ww", "data", "seam_clips")
 ROLL_STAB_MAX = 49.2202
 
-W, H = 900, 590
+W, H = 480, 340
 DEFAULT_FOVY = 50.0
 KEY_W, KEY_A, KEY_S, KEY_D, KEY_SPACE, KEY_SHIFT = (1, 2, 4, 8, 16, 32)
 
@@ -191,9 +218,23 @@ def _read_settings_document():
 
 _initial_settings = _read_settings_document()
 
-panel = gui.window(WINDOW_TITLE)
-panel.enable_hardware_canvas()
+# Group order selects the left column in Dolphin's grouped controls layout.
+# Collision/View and Culling share the left column. Leave its height flexible
+# so Qt fills the column and keeps its contents aligned with the Tools group.
+WINDOW_STYLE = ('ScriptCanvasWidget { min-width: 480px; min-height: 340px; } '
+                'QScrollArea { min-height: 420px; max-height: 900px; } '
+                'QGroupBox[title="Collision and View"] { '
+                'min-width: 240px; max-width: 360px; }')
+panel = gui.window(WINDOW_TITLE, style=WINDOW_STYLE)
+SOFTWARE_RENDER = RENDER_MODE == "software" or (RENDER_MODE == "auto" and sys.platform != "win32")
+if not SOFTWARE_RENDER:
+    try:
+        panel.enable_hardware_canvas()
+    except Exception:
+        SOFTWARE_RENDER = True  # this build has no hardware canvas; fall back to the CPU canvas
 canvas = panel.canvas(W, H)
+if SOFTWARE_RENDER:
+    canvas = SoftCanvas(canvas, wire_color=C_WIREFRAME)
 cb_enabled = panel.checkbox("Collision mesh", True, group="Collision and View")
 cb_movebg = panel.checkbox("Movable BG", True, group="Collision and View")
 cb_follow_cam = panel.checkbox("Follow Cam", True, group="Collision and View")
@@ -202,8 +243,8 @@ cb_slope = panel.checkbox("Slopes", True, group="Collision and View")
 cb_wall = panel.checkbox("Walls", True, group="Collision and View")
 cb_roof = panel.checkbox("Roofs", False, group="Collision and View")
 cb_filled = panel.checkbox("Filled", True, group="Collision and View")
-cb_wire = panel.checkbox("Wireframe", True, group="Collision and View")
-cb_xray = panel.checkbox("X-ray", False, group="Collision and View")
+cb_wire = panel.checkbox("Wireframe", False, group="Collision and View")
+cb_xray = panel.checkbox("X-ray", True, group="Collision and View")
 cb_view_cull = panel.checkbox("Cull outside view", True, group="Collision and View")
 move_speed_slider = panel.slider_float("Freecam speed", 10.0, 500.0, group="Collision and View")
 move_speed_slider.value = 50.0
@@ -212,13 +253,46 @@ wire_opacity_slider.value = 1.0
 opacity_slider = panel.slider_float("Collision opacity", 0.0, 1.0, group="Collision and View")
 opacity_slider.value = 0.54
 radius_slider = panel.slider_float("Draw radius", 0.0, 12000.0, group="Collision and View")
+# Dolphin exposes one group on the left; a subsection keeps both tools there.
+cull_heading = panel.text("Culling", group="Collision and View",
+                          style="QLabel { font-weight: bold; border-top: 1px solid #657080; "
+                                "margin-top: 10px; padding-top: 8px; }")
+cb_culling = panel.checkbox("Culling overlay", False, group="Collision and View")
+cb_cull_visible = panel.checkbox("Visible cull boxes (green)", True, group="Collision and View")
+cb_cull_hidden = panel.checkbox("Culled boxes (red)", True, group="Collision and View")
+cb_cull_frustum = panel.checkbox("Game camera frustum", True, group="Collision and View")
+cb_cull_labels = panel.checkbox("Cull box names", False, group="Collision and View")
+cb_cull_follow_link = panel.checkbox("Follow Link in culling view", True, group="Collision and View")
+cull_frame_button = panel.button("Frame culling view", group="Collision and View")
+cull_help = panel.text("JP/GZLJ01. Magenta = draw-state mismatch.", group="Collision and View")
+cull_status = panel.text("Culling overlay disabled.\n\n", group="Collision and View",
+                         style="QLabel { min-width: 280px; max-width: 280px; "
+                               "min-height: 64px; max-height: 64px; font-family: monospace; font-size: 12px; }")
 reset_button = panel.button("Reset view / refresh static cache", group="Tools")
 cb_vertex_select = panel.checkbox("Vertex Select", False, group="Tools")
-cb_filled_triggers = panel.checkbox("Filled triggers", True, group="Triggers")
+cb_floor_ray = panel.checkbox("Link floor ray (engine result)", False, group="Tools")
+cb_floor_inspector = panel.checkbox("Triangle Inspector", False, group="Tools")
+triangle_info = panel.text("Enable inspector, then click a collision triangle.", group="Tools")
+TRIANGLE_HELP_STYLE = 'QLabel { qproperty-wordWrap: true; min-width: 0px; }'
+# Let Qt wrap to the actual Tools width instead of clipping a capped-width label.
+TRIANGLE_FIELDS_TEXT = "Fields: " + ", ".join(TRIANGLE_FIELDS)
+TRIANGLE_FIELDS_STYLE = 'QLabel { qproperty-wordWrap: true; min-width: 0px; font-size: 11px; }'
+triangle_fields_help = panel.text(TRIANGLE_FIELDS_TEXT, group="Tools", style=TRIANGLE_FIELDS_STYLE)
+triangle_field = panel.input_text("Property name", "exit_id", group="Tools")
+triangle_value = panel.input_text("Property value", "", group="Tools")
+triangle_read = panel.button("Read property", group="Tools")
+triangle_apply = panel.button("Apply triangle property", group="Tools")
+triangle_shared = panel.checkbox("Edit shared record (affects every user)", False, group="Tools")
+triangle_edit_help = panel.text("Unchecked: if Ti is shared, copy it to an unused property slot and update only this triangle's Ti index. Requires an unused slot. Checked: edit the existing record for every triangle using it. exit_id selects an SCLS entry; the destination is stored in SCLS.", group="Tools", style=TRIANGLE_HELP_STYLE)
+cb_filled_triggers = panel.checkbox("Filled triggers", False, group="Triggers")
 trigger_opacity_slider = panel.slider_float("Trigger opacity", 0.0, 1.0, group="Triggers")
 trigger_opacity_slider.value = 0.54
 cb_on_top_triggers = panel.checkbox("On Top Triggers", False, group="Triggers")
 cb_load = panel.checkbox("Load zones", True, group="Triggers")
+cb_leaf_exits = panel.checkbox("Leaf exit projection (nearest floor)", False, group="Triggers")
+cb_leaf_columns = panel.checkbox("Show tall exit columns", False, group="Triggers")
+LEAF_EXIT_HELP = "Filled areas show usable exits at Link's height. Exit geometry is cached; only changed exits or nearby blockers rebuild it. Trigger opacity controls the fill. Tall columns are optional."
+leaf_exit_help = panel.text(LEAF_EXIT_HELP, group="Triggers")
 cb_event = panel.checkbox("Event areas", True, group="Triggers")
 cb_switch = panel.checkbox("Switch areas", False, group="Triggers")
 cb_other = panel.checkbox("Other Triggers", True, group="Triggers")
@@ -229,16 +303,22 @@ cb_enemy_hp = panel.checkbox("Enemy HP bars", False, group="Colliders")
 cb_attack_info = panel.checkbox("Attack Info", True, group="Colliders")
 cb_target_info = panel.checkbox("Target Info", False, group="Colliders")
 cb_attack_actor = panel.checkbox("Attack Names", True, group="Colliders")
-cb_target_actor = panel.checkbox("Target Names", False, group="Colliders")
+cb_target_actor = panel.checkbox("Target Names", True, group="Colliders")
 cb_contact_actor = panel.checkbox("Push Names", False, group="Colliders")
 cb_coordinate_dot = panel.checkbox("Coordinate Dot", True, group="Colliders")
 cb_actor_names = panel.checkbox("Actor Names", False, group="Colliders")
-cb_move_actor = panel.checkbox("Move Actor", False, group="Actor Tools")
-cb_zone_info = panel.checkbox("Zone / room info", False, group="Actor Tools")
+cb_move_actor = panel.checkbox("Actor Selector", False, group="Tools")
+cb_move_collider = panel.checkbox("Collider Selector", False, group="Tools")
+collider_move_info = panel.text("Enable Collider Selector, click a shape, then drag its center or an axis.", group="Tools")
+collider_restore = panel.button("Reset selected collider offset", group="Tools")
+collider_restore_all = panel.button("Restore all", group="Tools")
 cb_seams = panel.checkbox("Show Seam Clips", False, group="Seam Clips")
 seam_initial_button = panel.button("Teleport seam initial", group="Seam Clips")
 seam_clip_button = panel.button("Teleport seam clip", group="Seam Clips")
 status = panel.text("Waiting for TWW collision...", group="Tools")
+renderer_note = panel.text("Renderer: %s" % ("software (CPU canvas)" if SOFTWARE_RENDER else "hardware"),
+                           group="Tools")
+cb_zone_info = panel.checkbox("Zone flags", False, group="Tools")
 save_settings_button = panel.button("Save Settings", group="Settings")
 
 _CHECKBOX_SETTINGS = {
@@ -254,6 +334,11 @@ _CHECKBOX_SETTINGS = {
     "xray": cb_xray,
     "cull_outside_view": cb_view_cull,
     "vertex_select": cb_vertex_select,
+    "floor_ray": cb_floor_ray,
+    "floor_inspector": cb_floor_inspector,
+    "leaf_exit_projection": cb_leaf_exits,
+    "leaf_exit_columns": cb_leaf_columns,
+    "move_collider": cb_move_collider,
     "filled_triggers": cb_filled_triggers,
     "on_top_triggers": cb_on_top_triggers,
     "load_zones": cb_load,
@@ -271,6 +356,12 @@ _CHECKBOX_SETTINGS = {
     "push_names": cb_contact_actor,
     "coordinate_dot": cb_coordinate_dot,
     "actor_names": cb_actor_names,
+    "culling_overlay": cb_culling,
+    "cull_visible": cb_cull_visible,
+    "cull_hidden": cb_cull_hidden,
+    "cull_frustum": cb_cull_frustum,
+    "cull_labels": cb_cull_labels,
+    "cull_follow_link": cb_cull_follow_link,
     "move_actor": cb_move_actor,
     "zone_room_info": cb_zone_info,
     "show_seam_clips": cb_seams,
@@ -355,6 +446,10 @@ _snapshot = None
 _link = None
 _link_actor = 0
 _game_camera = None
+_cull_snapshot = None
+_cull_revision = 0
+_cull_status_text = "Waiting for culling data..."
+_cull_follow_anchor = None
 _frame = 0
 _host_ticks = 0
 _state_load_pending = False
@@ -365,7 +460,6 @@ _state_load_recover_registry = False
 _state_overlay_history = {}
 _state_load_overlay_snapshot = None
 _last_error = ""
-_diag = False
 
 _freecam = {"pos": [0.0, 0.0, 0.0], "az": 38.0, "el": 29.0, "ready": False}
 _mouse_look = {"active": False, "x": 0.0, "y": 0.0}
@@ -409,6 +503,9 @@ _actor_positions = {}
 _actor_records = {}
 _room_zones = {}
 _zones = {}
+_room_status_flags = {}
+_zone_actor_records = {}
+_zone_label_revision = 0
 _move_actor_selected = None
 _move_actor_drag = None
 _move_actor_locks = {}
@@ -429,12 +526,29 @@ _runtime_diag = {
     "push_enabled": 0,
     "push_decoded": 0,
 }
-_runtime_diag_last = None
 _status_summary_last = None
 
 _seams = {"stage": None, "room": None, "clips": [], "selected": None}
 _selected_face = None
 _selected_point = None
+_floor_query = None
+_triangle_selection = None
+_triangle_ui_key = None
+_exit_projection_key = None
+_exit_projection = []
+_exit_projection_error = ""
+_exit_triangle_cache = {}
+_exit_geometry_revision = 0
+_exit_render_key = None
+_exit_render_positions = array('f')
+_exit_render_colors = array('I')
+_edit_mode_previous = {}
+_move_collider_watch_ready = False
+_move_collider_watch_key = None
+_collider_flag_watches = set()
+_applying_collider_flags = False
+_collider_registration_watch = None
+_last_stage_context = None
 
 
 def _sync_canvas_size():
@@ -531,7 +645,7 @@ def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count
         if not active_count and not (_u32(data, sprm_offset) & 1):
             continue
         enabled += 1
-        collider = COLLIDER_DECODER.decode(data)
+        collider = _decode_collider(address, data)
         if collider is not None:
             colliders.append(collider)
             for labels_list, builder in label_sinks:
@@ -609,16 +723,27 @@ def _append_actor_label(labels, collider, data):
     if len(labels) >= MAX_ACTOR_LABELS:
         return
     owner = collider[1]
-    if not owner:
-        return
-    try:
-        procedure = memory.read_u16(owner + ACTOR_PROC)
-    except Exception:
-        return
+    name='No actor owner'
+    if owner:
+        try:
+            procedure = memory.read_u16(owner + ACTOR_PROC)
+            name=proc_name(procedure, "Proc 0x%03X" % procedure)
+        except Exception:return
     position = _collider_actor_label_anchor(collider)
     if not _finite_vec(position):
         return
-    labels.append((position, proc_name(procedure, "Proc 0x%03X" % procedure)))
+    labels.append((position,name))
+
+
+def _append_contact_label(labels,collider,data):
+    if collider[1]:
+        _append_actor_label(labels,collider,data)
+    elif len(labels)<MAX_ACTOR_LABELS:
+        position=_collider_actor_label_anchor(collider)
+        if _finite_vec(position):
+            labels.append((position,'No actor owner | '+_physical_collision_name(_u32(data,COLLIDER_CONTACT_SPRM))))
+
+
 
 
 def _collider_label_sinks():
@@ -639,7 +764,7 @@ def _collider_label_sinks():
     if labels["target_actor"] is not None:
         sinks["target"].append((labels["target_actor"], _append_actor_label))
     if labels["contact_actor"] is not None:
-        sinks["push"].append((labels["contact_actor"], _append_actor_label))
+        sinks["push"].append((labels["contact_actor"], _append_contact_label))
     return labels, sinks
 
 
@@ -774,7 +899,7 @@ def _read_actor_triggers():
         elif proc == PROC_TAG_EVSW:
             try:
                 collider_address = actor + ACTOR_SWITCH_CYLINDER
-                collider = COLLIDER_DECODER.decode(RD.read_bytes(collider_address, 0x150))
+                collider = _decode_collider(collider_address)
             except Exception:
                 collider = None
             if collider is not None and collider[0] == "cylinder":
@@ -803,42 +928,29 @@ def _read_actor_triggers():
 
 
 def _read_zone_info():
-    rooms, zones = {}, {}
+    global _room_status_flags
     try:
-        room_data = RD.read_bytes(ROOM_STATUS_BASE, ROOM_STATUS_STRIDE * ROOM_STATUS_COUNT)
-        for room_no in range(ROOM_STATUS_COUNT):
-            zone_no = struct.unpack_from(">b", room_data,
-                                         room_no * ROOM_STATUS_STRIDE + ROOM_STATUS_ZONE_NO_OFFSET)[0]
-            if zone_no >= 0:
-                rooms[room_no] = zone_no
-        zone_data = RD.read_bytes(ZONE_ARRAY_BASE, ZONE_STRIDE * ZONE_COUNT)
-        for zone_no in range(ZONE_COUNT):
-            room_no = struct.unpack_from(">b", zone_data, zone_no * ZONE_STRIDE)[0]
-            if room_no >= 0:
-                base = zone_no * ZONE_STRIDE
-                switches = struct.unpack_from(">3H", zone_data, base + 2)
-                items = struct.unpack_from(">H", zone_data, base + 8)[0]
-                zones[zone_no] = (room_no, switches, items)
+        rooms, zones, _room_status_flags = read_zone_tables(RD, ROOM_STATUS_BASE, ZONE_ARRAY_BASE)
+        return rooms, zones
     except Exception:
+        _room_status_flags = {}
         return {}, {}
-    return rooms, zones
 
 
 def _actor_room_no(header, procedure, actor):
     try:
-        if procedure == 0x0126:  # TBOX retains its authored room at +0x290.
-            room = struct.unpack(">i", RD.read_bytes(actor + 0x290, 4))[0]
-        else:
-            room = struct.unpack_from(">b", header, ACTOR_CURRENT + 0x12)[0]
-        return room if room >= 0 else None
+        room = struct.unpack_from('>b', header, ACTOR_CURRENT + 0x12)[0]
+        return room if 0 <= room < ROOM_STATUS_COUNT else None
     except Exception:
         return None
 
 
 def _refresh_actor_records(camera):
     """Scan actor queue once for labels, manipulation, and room/zone data."""
-    global _actor_positions, _actor_records, _actor_labels, _room_zones, _zones
+    global _actor_positions, _actor_records, _actor_labels, _room_zones, _zones, _zone_actor_records, _zone_label_revision
     labels, positions, records = [], {}, {}
+    _zone_actor_records = {}
+    _zone_label_revision += 1
     _room_zones, _zones = _read_zone_info()
     try:
         queue = RD.read_bytes(ACTOR_QUEUE, 12)
@@ -857,7 +969,7 @@ def _refresh_actor_records(camera):
             actor, node = _u32(entry, 0x0C), _u32(entry, 8)
             if not _valid_ptr(actor):
                 continue
-            header = RD.read_bytes(actor, ACTOR_CURRENT + 12)
+            header = RD.read_bytes(actor, ACTOR_CURRENT + 0x14)
             position = _vec3(header, ACTOR_CURRENT)
             if not _finite_vec(position):
                 continue
@@ -868,13 +980,13 @@ def _refresh_actor_records(camera):
         zone_no = _room_zones.get(room_no)
         positions[actor] = position
         records[actor] = (procedure, position, room_no, zone_no)
-        if (cb_actor_names.checked and len(labels) < MAX_ACTOR_LABELS and
+        if cb_zone_info.checked:
+            _zone_actor_records[actor] = actor_switches(RD,actor,procedure,header,_room_zones,_zones,
+                                                       stay_room=_read_room())
+        zone_name=cb_zone_info.checked and any(t['overlay'] for t in _zone_actor_records.get(actor,()))
+        if (cb_actor_names.checked and not zone_name and len(labels) < MAX_ACTOR_LABELS and
                 _overlay_visible(camera, position, 160.0)):
             label = proc_name(procedure, "Proc 0x%03X" % procedure)
-            if cb_zone_info.checked:
-                label += " [R%s Z%s]" % (
-                    "-" if room_no is None else room_no,
-                    "-" if zone_no is None else zone_no)
             labels.append((position, label))
     _actor_positions, _actor_records, _actor_labels = positions, records, labels
 
@@ -901,7 +1013,7 @@ def _probe_plant_collider_offsets(actor):
         if not _valid_ptr(shape_vptr):
             continue
         collider_data = data[offset:offset + 0x150]
-        collider = COLLIDER_DECODER.decode(collider_data)
+        collider = _decode_collider(actor + offset, collider_data)
         if collider is None or collider[1] != actor:
             continue
         if collider[0] not in ("box", "cylinder", "sphere", "capsule", "triangle"):
@@ -953,7 +1065,7 @@ def _read_foliage_colliders(camera, force=False):
                 collider_data = RD.read_bytes(address, 0x150)
             except Exception:
                 continue
-            collider = COLLIDER_DECODER.decode(collider_data)
+            collider = _decode_collider(actor + offset, collider_data)
             if collider is None or collider[1] != actor:
                 continue
             seen_colliders.add(address)
@@ -992,7 +1104,7 @@ def _read_state_recovery_colliders():
                 continue
             if COLLIDER_DECODER.shape_kind(collider_data) is None:
                 continue
-            collider = COLLIDER_DECODER.decode(collider_data)
+            collider = _decode_collider(actor + offset, collider_data)
             if collider is None or collider[1] != actor:
                 continue
             seen_colliders.add(address)
@@ -1012,7 +1124,7 @@ def _read_player_state_colliders():
     for offset in PLAYER_STATE_COLLIDER_OFFSETS:
         try:
             data = RD.read_bytes(actor + offset, 0x150)
-            collider = COLLIDER_DECODER.decode(data)
+            collider = _decode_collider(actor + offset, data)
         except Exception:
             continue
         if collider is not None and collider[1] == actor:
@@ -1031,7 +1143,7 @@ def _read_player_attack_colliders():
         return colliders
     for offset in PLAYER_ATTACK_COLLIDER_OFFSETS:
         try:
-            collider = COLLIDER_DECODER.decode(RD.read_bytes(actor + offset, 0x150))
+            collider = _decode_collider(actor + offset)
         except Exception:
             continue
         if collider is None or collider[1] != actor:
@@ -1256,6 +1368,14 @@ def _apply_input():
             _fullscreen_before_capture = _viewer_fullscreen
             _viewer_fullscreen = True
             _clean_capture = True
+        changed = True
+    _sync_edit_modes()
+    if cull_frame_button.clicked:
+        cb_culling.checked = True
+        cb_follow_cam.checked = False
+        _freecam.update(pos=[0.0, 0.0, 0.0], az=38.0, el=29.0, ready=False)
+        _mouse_look["active"] = False
+        _ensure_freecam()
         changed = True
     if reset_button.clicked:
         _cache = None
@@ -1738,20 +1858,6 @@ def _vertex_hud_layout():
     return x0, x1, 194
 
 
-def _point_in_triangle(point, a, b, c):
-    px, py = point
-    ax, ay = a; bx, by = b; cx, cy = c
-    denominator = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
-    if abs(denominator) < 0.000001:
-        return None
-    u = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / denominator
-    v = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denominator
-    w = 1.0 - u - v
-    if u < -0.001 or v < -0.001 or w < -0.001:
-        return None
-    return u, v, w
-
-
 def _pick_collision_face(camera, screen_point):
     """Return the nearest enabled collision face below a canvas click."""
     if _snapshot is None:
@@ -1771,7 +1877,7 @@ def _pick_collision_face(camera, screen_point):
     nearest = None
     nearest_distance = float("inf")
     origin = camera.position
-    for mesh in _snapshot["meshes"].values():
+    for slot, mesh in _snapshot["meshes"].items():
         if mesh["is_movebg"]:
             if not cb_movebg.checked:
                 continue
@@ -1798,23 +1904,49 @@ def _pick_collision_face(camera, screen_point):
             if v < 0.0 or u + v > 1.0:
                 continue
             distance = _dot(edge2, cross2) * inverse
-            if distance <= camera.near or distance > nearest_distance + 0.01:
+            hit = tuple(origin[axis] + ray[axis] * distance for axis in range(3))
+            if (_dot(_sub(hit, origin), camera.forward) <= camera.near or
+                    distance > nearest_distance + 0.01):
                 continue
             # Prefer static collision on an effectively identical surface.
             if (abs(distance - nearest_distance) <= 0.01 and nearest is not None and
                     not mesh["is_movebg"] and nearest["move"]):
                 continue
-            projected = (camera.project(a), camera.project(b), camera.project(c))
-            if any(point is None for point in projected):
-                continue
+            # The visible part can be hit even when original corners are behind
+            # the near plane (common on large terrain faces).
             nearest_distance = distance
             nearest = {
-                "screen": tuple(point[0] for point in projected),
+                "hit": hit,
                 "world": (a, b, c),
                 "class": surface_class,
                 "move": mesh["is_movebg"],
+                "slot": slot, "index": index, "bgw": mesh["bgw"], "pm_bgd": mesh["pm_bgd"],
             }
     return nearest
+
+
+def _project_face_edges(camera, world):
+    """Project original face edges, clipping those that cross the near plane."""
+    edges = []
+    near = camera.near + 0.001
+    for first, second in ((0, 1), (1, 2), (2, 0)):
+        a, b = world[first], world[second]
+        depth_a = _dot(_sub(a, camera.position), camera.forward)
+        depth_b = _dot(_sub(b, camera.position), camera.forward)
+        if depth_a < near and depth_b < near:
+            continue
+        if depth_a < near:
+            t = (near - depth_a) / (depth_b - depth_a)
+            a = tuple(a[axis] + (b[axis] - a[axis]) * t for axis in range(3))
+            depth_a = near
+        elif depth_b < near:
+            t = (near - depth_b) / (depth_a - depth_b)
+            b = tuple(b[axis] + (a[axis] - b[axis]) * t for axis in range(3))
+            depth_b = near
+        projected_a, projected_b = camera.project(a), camera.project(b)
+        if projected_a is not None and projected_b is not None:
+            edges.append((projected_a[0], projected_b[0], a, b, depth_a, depth_b))
+    return edges
 
 
 def _edge_point(mouse, first, second):
@@ -1984,7 +2116,12 @@ def _queue_load_zone_volume(lower, upper):
 
 
 def _queue_load_zones(camera):
-    """Draw each DZB exit as an extruded boundary, not extruding the tri edges."""
+    """Raw authored exit volumes, or nearest-floor projected gliding regions."""
+    leaf_exit_help.visible = cb_leaf_exits.checked
+    cb_leaf_columns.visible = cb_leaf_exits.checked
+    if cb_leaf_exits.checked:
+        _queue_leaf_exit_projection(camera)
+        return
     if not cb_load.checked or _snapshot is None:
         return
     for mesh in _snapshot["meshes"].values():
@@ -2022,7 +2159,7 @@ def _commit_overlays():
     overlay_line_colors = _line_colors.tobytes()
     line_positions = b""
     line_colors = b""
-    if cb_wire.checked:
+    if cb_wire.checked and not SOFTWARE_RENDER:  # software mode wires the triangles directly
         if cb_enabled.checked:
             line_positions += _static_wire_positions
             line_colors += _static_wire_colors
@@ -2060,7 +2197,8 @@ def _set_hardware_state(camera):
              radius_slider.value, opacity_slider.value, wire_opacity_slider.value,
              trigger_opacity_slider.value, cb_filled.checked, cb_wire.checked, True,
              cb_xray.checked, cb_on_top_triggers.checked, _viewer_fullscreen, _clean_capture,
-             cb_enemy_hp.checked, cb_actor_names.checked, cb_coordinate_dot.checked)
+             cb_enemy_hp.checked, cb_actor_names.checked, cb_coordinate_dot.checked,
+             cb_culling.checked, cb_cull_labels.checked, cb_zone_info.checked)
     if state == _hardware_state_key:
         return
     canvas.hardware_state(camera.position, camera.right, camera.up, camera.forward, _active_focal(),
@@ -2068,7 +2206,8 @@ def _set_hardware_state(camera):
                           cb_filled.checked, cb_wire.checked, True, cb_xray.checked,
                           cb_on_top_triggers.checked, _viewer_fullscreen, _clean_capture,
                           hud_visible=(not _clean_capture or cb_enemy_hp.checked or
-                                       cb_actor_names.checked or cb_coordinate_dot.checked),
+                                       cb_actor_names.checked or cb_coordinate_dot.checked or cb_zone_info.checked or
+                                       (cb_culling.checked and cb_cull_labels.checked)),
                           overlay_opacity=trigger_opacity_slider.value)
     _hardware_state_key = state
 
@@ -2174,21 +2313,33 @@ def _draw_contact_actor_hud(hud, camera):
         _draw_label_set(hud, camera, _contact_actor_labels, C_PUSH)
 
 
-def _draw_zone_info_hud(hud):
-    if not cb_zone_info.checked or _snapshot is None:
+
+
+def _draw_zone_flags_hud(hud, camera):
+    if not cb_zone_info.checked:
         return
-    room = _read_room()
-    zone = _room_zones.get(room)
-    hud.rect_filled((10, 150), (420, 212), 0xDB10315D, 2).rect((10, 150), (420, 212), 0xFF3C9CFF, 2, 2)
-    hud.text((22, 160), 0xFFF2F7FF, "Room / Zone")
-    hud.text((22, 182), 0xFFF2F7FF, "Room: %s  Zone: %s" % (room, "-" if zone is None else zone))
-    details = _zones.get(zone)
-    if details is None:
-        hud.text((22, 200), 0xFFF2F7FF, "Loaded zone slots: %d" % len(_zones))
-    else:
-        _zone_room, switches, items = details
-        hud.text((22, 200), 0xFFF2F7FF, "Switch: %04X %04X %04X  Item: %04X" %
-                 (switches[0], switches[1], switches[2], items))
+    for address, targets in _zone_actor_records.items():
+        record = _actor_records.get(address)
+        if record is None:
+            continue
+        position = record[1]
+        projected = camera.project((position[0], position[1]+120.0, position[2]))
+        if projected is None:
+            continue
+        (x,y), _depth = projected
+        if not (0 <= x <= W and 0 <= y <= H):
+            continue
+        labels=[]
+        for target in targets:
+            if not target['overlay']:continue
+            room='-' if target['room'] is None else str(target['room'])
+            label='Room %s switch %d: %s' % (room,target['number'],target['state'])
+            if label not in labels:labels.append(label)
+        for index,label in enumerate(labels):
+            hud.text((x+4,y-16-index*16),0xFFE6EDF3,label)
+        if labels:
+            name=proc_name(record[0], "Proc 0x%03X" % record[0])
+            hud.text((x+4,y-16-len(labels)*16),0xFFE6EDF3,name)
 
 
 def _draw_move_actor_hud(hud):
@@ -2199,12 +2350,12 @@ def _draw_move_actor_hud(hud):
     hud.rect_filled((x0, y0), (x1, y1), panel_bg, 2).rect((x0, y0), (x1, y1), outline, 2, 2)
     info = _selected_actor_hud_info()
     if info is None:
-        hud.text((x0 + 12, y0 + 12), text, "Move Actor")
+        hud.text((x0 + 12, y0 + 12), text, "Actor Selector")
         hud.text((x0 + 12, y0 + 34), text, "Click a dynamic actor or collider")
         return
     procedure, position, rotation = info
     label = proc_name(procedure, "Proc 0x%03X" % procedure)
-    hud.text((x0 + 12, y0 + 10), text, "Move Actor: %s" % label)
+    hud.text((x0 + 12, y0 + 10), text, "Actor Selector: %s" % label)
     hud.text((x0 + 12, y0 + 34), text, "Address: 0x%08X   Proc ID: 0x%03X" % (_move_actor_selected, procedure))
     hud.text((x0 + 12, y0 + 58), text, "Position: X=%.3f  Y=%.3f  Z=%.3f" % position)
     hud.text((x0 + 12, y0 + 80), text, "Rotation: X=%d  Y=%d  Z=%d" % rotation)
@@ -2240,14 +2391,17 @@ def _update_overlay_text(camera):
     global _hardware_overlay_key
     clip = _seam_selection()
     selected_point = _selected_xyz_text() if _selected_point is not None else None
-    key = (W, H, _clean_capture, cb_seams.checked, cb_vertex_select.checked, len(_seams["clips"]),
+    collider_info = _selected_collider_hud_info() if cb_move_collider.checked else None
+    key = (cb_zone_info.checked, _zone_label_revision if cb_zone_info.checked else None,
+           _cull_revision, cb_culling.checked, cb_cull_labels.checked,
+           cb_cull_visible.checked, cb_cull_hidden.checked,
+           collider_info, cb_floor_ray.checked, repr(_floor_query) if cb_floor_ray.checked else None, cb_move_collider.checked, COLLIDER_EDITS.selected, W, H, _clean_capture, cb_seams.checked, cb_vertex_select.checked, len(_seams["clips"]),
            cb_enemy_hp.checked, tuple(_enemy_health), cb_actor_names.checked, tuple(_actor_labels),
            cb_attack_info.checked, tuple(_attack_labels),
            cb_attack_actor.checked, tuple(_attack_actor_labels),
            cb_target_info.checked, tuple(_target_info_labels),
            cb_target_actor.checked, tuple(_target_actor_labels),
            cb_contact_actor.checked, tuple(_contact_actor_labels),
-           cb_zone_info.checked, tuple(sorted(_room_zones.items())), tuple(sorted(_zones.items())),
            cb_move_actor.checked, _move_actor_selected, _selected_actor_hud_info(),
            tuple(sorted((actor, lock["position"]) for actor, lock in _move_actor_locks.items())),
            cb_coordinate_dot.checked, _link, camera.position, camera.right, camera.up, camera.forward,
@@ -2310,17 +2464,19 @@ def _update_overlay_text(camera):
                     hud.text((x0 + 178, 160), text, "Teleport")
     # These scene annotations are intentionally retained in clean capture
     # mode when enabled; normal canvas controls stay hidden there.
+    _draw_culling_hud(hud, camera)
     _draw_enemy_hp_hud(hud, camera)
     _draw_actor_names_hud(hud, camera)
+    _draw_zone_flags_hud(hud, camera)
     _draw_attack_info_hud(hud, camera)
     _draw_attack_actor_hud(hud, camera)
     _draw_target_info_hud(hud, camera)
     _draw_target_actor_hud(hud, camera)
     _draw_contact_actor_hud(hud, camera)
     _draw_coordinate_dot_hud(hud, camera)
-    if not cb_move_actor.checked:
-        _draw_zone_info_hud(hud)
+    _draw_floor_ray_hud(hud)
     _draw_move_actor_hud(hud)
+    _draw_move_collider_hud(hud,camera,collider_info)
     hud.commit()
     _hardware_overlay_key = key
 
@@ -2360,12 +2516,7 @@ def _handle_vertex_select(camera, click):
         record = _pick_collision_face(camera, click)
         if record is not None:
             if _selected_face is not None and _selected_face["world"] == record["world"]:
-                bary = _point_in_triangle(click, record["screen"][0], record["screen"][1], record["screen"][2])
-                if bary is not None:
-                    world = record["world"]
-                    _set_selected_point(tuple(
-                        sum(bary[index] * world[index][axis] for index in range(3))
-                        for axis in range(3)), record)
+                _set_selected_point(record["hit"], record)
             else:
                 _selected_face = record
                 _set_selected_point(None)
@@ -2380,14 +2531,17 @@ def _handle_vertex_select(camera, click):
         mouse_x, mouse_y, inside = canvas.mouse_pos()
         if inside:
             record = _selected_point["triangle"]
-            screen, world = record["screen"], record["world"]
-            best = min(((_edge_point((mouse_x, mouse_y), screen[first], screen[second]), first, second)
-                        for first, second in ((0, 1), (1, 2), (2, 0))),
-                       key=lambda item: item[0][1])
-            (t, _distance2), first, second = best
-            a, b = world[first], world[second]
-            _set_selected_point(tuple(a[axis] + (b[axis] - a[axis]) * t for axis in range(3)), record)
-            changed = True
+            edges = _project_face_edges(camera, record["world"])
+            if edges:
+                (t, _distance2), edge = min(
+                    ((_edge_point((mouse_x, mouse_y), edge[0], edge[1]), edge)
+                     for edge in edges), key=lambda item: item[0][1])
+                screen_a, screen_b, a, b, depth_a, depth_b = edge
+                # Convert the screen fraction back to a world-space fraction.
+                t = t * depth_a / ((1.0 - t) * depth_b + t * depth_a)
+                _set_selected_point(tuple(a[axis] + (b[axis] - a[axis]) * t
+                                          for axis in range(3)), record)
+                changed = True
     return changed, False
 
 
@@ -2505,11 +2659,13 @@ def _selected_actor_hud_info():
 
 
 def _move_actor_hud_layout():
-    return (10.0, 150.0, 420.0, 216.0) if _move_actor_selected is None else (10.0, 150.0, 430.0, 394.0)
+    height=66.0 if _move_actor_selected is None else 244.0
+    top=min(150.0,max(10.0,H-height-10.0))
+    return (10.0,top,420.0 if _move_actor_selected is None else 430.0,top+height)
 
 
-def _move_actor_button_rects():
-    x0, y0, x1, _y1 = _move_actor_hud_layout()
+def _move_actor_button_rects(layout=None):
+    x0, y0, x1, _y1 = layout or _move_actor_hud_layout()
     return ((x0 + 10.0, y0 + 104.0, x1 - 10.0, y0 + 132.0),
             (x0 + 10.0, y0 + 138.0, x1 - 10.0, y0 + 166.0),
             (x0 + 10.0, y0 + 172.0, x1 - 10.0, y0 + 200.0),
@@ -2749,7 +2905,109 @@ def _draw_move_actor_gizmo(camera):
             _start, _end, end_world = geometry
             _queue_line(position, end_world, color)
             _queue_marker(end_world, radius, color)
-            
+
+
+
+_CULL_BOX_EDGES = ((0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),
+                   (0,4),(1,5),(2,6),(3,7))
+C_CULL_VISIBLE, C_CULL_HIDDEN, C_CULL_MISMATCH = 0xFF37DD6A, 0x99FF5A5A, 0xFFFF00FF
+C_CULL_FRUSTUM, C_CULL_FAR, C_CULL_EYE = 0xFF39C6FF, 0x6639C6FF, 0xFFFFC83C
+
+
+def _set_cull_status(text):
+    """Keep live text within a fixed label; updates cannot change Qt layout bounds."""
+    global _cull_status_text
+    lines = []
+    for line in str(text).splitlines():
+        lines.extend(textwrap.wrap(line, width=36) or [""])
+    if len(lines) > 3:
+        lines = lines[:3]
+        lines[-1] = lines[-1][:35] + "~"
+    lines.extend([""] * (3-len(lines)))
+    bounded = "\n".join(lines)
+    if bounded != _cull_status_text:
+        _cull_status_text = bounded
+        cull_status.set(bounded)
+
+
+def _refresh_culling():
+    """Read only while enabled; failures never interrupt the collision viewer."""
+    global _cull_snapshot, _cull_revision, _cull_follow_anchor, _cull_status_text
+    if not cb_culling.checked:
+        if _cull_snapshot is not None:
+            _cull_revision += 1
+        _set_cull_status("Culling overlay disabled.")
+        _cull_snapshot = _cull_follow_anchor = None
+        return
+    _cull_revision += 1
+    try:
+        if bytes(RD.read_bytes(0x80000000, 6)) != b"GZLJ01":
+            raise ValueError("Culling overlay supports JP/GZLJ01 only")
+        _cull_snapshot = read_cull_snapshot(RD)
+        counts = _cull_snapshot["counts"]
+        boxed = [actor for actor in _cull_snapshot["actors"] if actor["our_culled"] is not None]
+        hidden = sum(bool(actor["our_culled"]) for actor in boxed)
+        _set_cull_status("Boxes: %d   Visible: %d   Culled: %d\nDraw-state differences: %d\nFar: %.0f   FOV: %.0f" %
+                         (len(boxed), len(boxed)-hidden, hidden, counts["mismatch"],
+                          _cull_snapshot["cull_far"], _cull_snapshot["camera"]["fovy"]))
+        anchor = tuple(_cull_snapshot["link"])
+        if cb_cull_follow_link.checked and not cb_follow_cam.checked:
+            _ensure_freecam()
+            if _cull_follow_anchor is not None:
+                for axis in range(3):
+                    _freecam["pos"][axis] += anchor[axis] - _cull_follow_anchor[axis]
+            _cull_follow_anchor = anchor
+        else:
+            _cull_follow_anchor = None
+    except Exception as exc:
+        _cull_snapshot = _cull_follow_anchor = None
+        _set_cull_status("Culling overlay: " + str(exc))
+
+
+def _visible_cull_actors():
+    if not cb_culling.checked or _cull_snapshot is None:
+        return
+    for actor in _cull_snapshot["actors"]:
+        if actor["our_culled"] is None or actor["corners"] is None:
+            continue
+        mismatch = actor["agree"] is False
+        if not mismatch and not (cb_cull_hidden.checked if actor["our_culled"] else cb_cull_visible.checked):
+            continue
+        color = (C_CULL_MISMATCH if mismatch else
+                 C_CULL_HIDDEN if actor["our_culled"] else C_CULL_VISIBLE)
+        yield actor, color
+
+
+def _queue_culling_overlay(camera):
+    if not cb_culling.checked or _cull_snapshot is None:
+        return
+    if cb_cull_frustum.checked:
+        corners = _cull_snapshot["frustum_corners"]
+        for first, second in _CULL_BOX_EDGES:
+            color = C_CULL_FAR if first >= 4 and second >= 4 else C_CULL_FRUSTUM
+            _queue_line(corners[first], corners[second], color)
+    for actor, color in _visible_cull_actors():
+        corners = actor["corners"]
+        for first, second in _CULL_BOX_EDGES:
+            _queue_line(corners[first], corners[second], color)
+    game_camera = _cull_snapshot["camera"]
+    eye, target, link = game_camera["eye"], game_camera["center"], _cull_snapshot["link"]
+    _queue_line(eye, target, C_CULL_EYE)
+    _queue_marker(eye, _screen_marker_radius(camera, eye, 6.0, 5.0, 250.0), C_CULL_EYE)
+    _queue_marker(link, _screen_marker_radius(camera, link, 4.0, 4.0, 180.0), 0xFFFFFFFF)
+
+
+def _draw_culling_hud(hud, camera):
+    if not cb_culling.checked:
+        return
+    if not cb_cull_labels.checked:
+        return
+    for actor, color in _visible_cull_actors():
+        projected = camera.project(actor["pos"])
+        if projected is not None:
+            (x, y), _depth = projected
+            if -200 <= x <= W and 0 <= y <= H:
+                hud.text((x+4, y-6), color, actor["name"])
 
 
 def _draw_scene():
@@ -2757,6 +3015,8 @@ def _draw_scene():
     global _volume_positions, _volume_colors
     if save_settings_button.clicked:
         _save_settings()
+    _update_triangle_inspector()
+    _update_collider_tools()
     _sync_canvas_size()
     if _snapshot is None:
         return
@@ -2810,14 +3070,19 @@ def _draw_scene():
                 continue
             _draw_collider(camera, collider, C_TARGET)
     _queue_load_zones(camera)
+    _queue_floor_tools(camera)
+    _draw_move_collider_gizmo(camera)
     _queue_seams(camera)
+    _queue_culling_overlay(camera)
     _draw_move_actor_gizmo(camera)
     _commit_overlays()
     _update_overlay_text(camera)
+    if SOFTWARE_RENDER:
+        canvas.flush()
 
 
 def _refresh_live(force=False, recover_registry=False):
-    global _cache, _snapshot, _link, _link_actor, _selected_face
+    global _cache, _snapshot, _link, _link_actor, _selected_face, _floor_query, _last_stage_context
     _snapshot = read_collision(RD, cache=_cache)
     _cache = _snapshot
     _link = _read_link()
@@ -2825,8 +3090,19 @@ def _refresh_live(force=False, recover_registry=False):
         _link_actor = memory.read_u32(PLAYER_PTR) & 0xFFFFFFFF
     except Exception:
         _link_actor = 0
+    context = (_snapshot["stage"], _link_actor)
+    if _last_stage_context is not None and context != _last_stage_context:
+        COLLIDER_EDITS.clear(restore=False)
+    _last_stage_context = context
     _refresh_game_camera()
+    _refresh_culling()
     _refresh_runtime_overlays(force, recover_registry)
+    _sync_moved_collider_shapes()
+    try:
+        _floor_query = (read_link_ground_query(RD, _link_actor)
+                        if _valid_ptr(_link_actor) and (cb_floor_ray.checked or cb_leaf_exits.checked) else None)
+    except Exception:
+        _floor_query = None
     stage, room = _snapshot["stage"], _read_room()
     if force or (stage, room) != (_seams["stage"], _seams["room"]):
         _seams.update(stage=stage, room=room, clips=_load_seams(stage, room), selected=None)
@@ -2835,7 +3111,7 @@ def _refresh_live(force=False, recover_registry=False):
 
 
 def _update_status():
-    global _runtime_diag_last, _status_summary_last
+    global _status_summary_last
     if _snapshot is None:
         return
     mesh_count = len(_snapshot["meshes"])
@@ -2846,21 +3122,12 @@ def _update_status():
     if summary != _status_summary_last:
         status.set(summary)
         _status_summary_last = summary
-    diagnostic = ("tags %(tagged)d/%(actor_queue)d Co %(push_slots)d/%(push_enabled)d/%(push_decoded)d "
-                  "At %(attack_slots)d/%(attack_enabled)d/%(attack_decoded)d" % _runtime_diag)
-    if diagnostic != _runtime_diag_last:
-        print("[TWW Collision Viewer] " + diagnostic)
-        _runtime_diag_last = diagnostic
 
 
 def _report_error(prefix, exc):
-    global _last_error, _diag
+    global _last_error
     _last_error = prefix + str(exc)
     status.set(_last_error)
-    if not _diag:
-        import traceback
-        print("[TWW Collision Viewer] " + traceback.format_exc())
-        _diag = True
 
 
 def _update(force=False, recover_registry=False):
@@ -2869,13 +3136,7 @@ def _update(force=False, recover_registry=False):
         _refresh_live(force=force, recover_registry=recover_registry)
         camera = _viewer_camera()
         click = canvas.take_click()
-        move_changed, move_consumed = _handle_move_actor(camera, click)
-        if not move_consumed and not cb_move_actor.checked:
-            vertex_changed, click_consumed = _handle_vertex_select(camera, click)
-            if not click_consumed:
-                changed = _pick_seam(camera, click) or changed
-            changed = vertex_changed or changed
-        changed = move_changed or changed
+        changed = _handle_edit_tools(camera, click) or changed
         _update_status()
         _draw_scene()
     except Exception as exc:
@@ -2893,9 +3154,21 @@ def on_frameadvance():
 
 
 def on_memorywatch(is_write, address, value):
-    if (is_write and address == COLLIDER_SNAPSHOT_WATCH and value == 0 and
-            (cb_attack.checked or cb_target.checked or cb_push.checked)):
-        _capture_live_colliders()
+    global _applying_collider_flags
+    if not is_write and address==_collider_registration_watch:
+        _register_locked_colliders()
+    if address in _collider_flag_watches and not _applying_collider_flags:
+        _apply_collider_flag_locks()
+    if is_write and address == CCS_BASE + 0x280C and value > 0 and COLLIDER_EDITS.offsets:
+        try:
+            if value <= 0x500:
+                collider_address = memory.read_u32(CCS_BASE + 0x1400 + (value - 1) * 4) & 0xFFFFFFFF
+                COLLIDER_EDITS.apply_registration(collider_address)
+        except Exception as exc:
+            COLLIDER_EDITS.last_error = str(exc)
+    if is_write and address == COLLIDER_SNAPSHOT_WATCH and value == 0:
+        if cb_attack.checked or cb_target.checked or cb_push.checked:
+            _capture_live_colliders()
 
 
 @event.on_savestatesave
@@ -2914,13 +3187,7 @@ def on_hostupdate():
         if _snapshot is not None:
             camera = _viewer_camera()
             click = canvas.take_click()
-            move_changed, move_consumed = _handle_move_actor(camera, click)
-            if not move_consumed and not cb_move_actor.checked:
-                vertex_changed, click_consumed = _handle_vertex_select(camera, click)
-                if not click_consumed:
-                    changed = _pick_seam(camera, click) or changed
-                changed = vertex_changed or changed
-            changed = move_changed or changed
+            changed = _handle_edit_tools(camera, click) or changed
         if _state_load_pending:
             signature = _state_ram_signature()
             _state_load_wait_ticks += 1
@@ -2956,6 +3223,13 @@ def on_hostupdate():
 
 @event.on_savestateload
 def on_savestateload(*_):
+    global _cull_snapshot, _cull_revision, _cull_follow_anchor, _cull_status_text
+    _cull_snapshot = _cull_follow_anchor = None
+    _set_cull_status("Waiting for culling data...")
+    _cull_revision += 1
+    global _triangle_selection, _floor_query, _exit_projection_key
+    COLLIDER_EDITS.clear(restore=False)
+    _triangle_selection = _floor_query = _exit_projection_key = None
     global _cache, _snapshot, _hardware_mesh_key, _hardware_dynamic_key, _hardware_state_key
     global _hardware_line_key, _hardware_on_top_line_key, _hardware_marker_key, _hardware_volume_key
     global _hardware_overlay_key, _stage_visible
@@ -2963,6 +3237,7 @@ def on_savestateload(*_):
     global _enemy_health, _actor_labels, _attack_labels, _attack_actor_labels
     global _target_info_labels, _target_actor_labels, _contact_actor_labels
     global _actor_positions, _actor_records, _room_zones, _zones
+    global _room_status_flags, _zone_actor_records, _zone_label_revision
     global _trigger_filter_key, _link_actor, _selected_face
     global _actor_fallback_colliders, _state_recovery_colliders, _foliage_probe_offsets
     global _state_load_pending, _state_load_wait_ticks, _state_load_signature
@@ -2986,6 +3261,9 @@ def on_savestateload(*_):
     _actor_records = {}
     _room_zones = {}
     _zones = {}
+    _room_status_flags = {}
+    _zone_actor_records = {}
+    _zone_label_revision += 1
     _move_actor_selected = None
     _move_actor_drag = None
     _move_actor_locks = {}
@@ -3017,10 +3295,627 @@ def _remove_collider_watch():
         if remove is None:
             continue
         try:
+            for address in _collider_flag_watches:remove(address)
+            _collider_flag_watches.clear()
+            if _collider_registration_watch is not None:remove(_collider_registration_watch)
             remove(COLLIDER_SNAPSHOT_WATCH)
+            if _move_collider_watch_ready:
+                remove(CCS_BASE + 0x280C)
             return
         except Exception:
             continue
+
+
+def _sync_edit_modes():
+    """The most recently enabled picking tool owns canvas clicks."""
+    global _move_actor_mode_active
+    modes = {'collider': cb_move_collider, 'floor': cb_floor_inspector,
+             'vertex': cb_vertex_select, 'actor': cb_move_actor}
+    newly = [name for name, control in modes.items()
+             if control.checked and not _edit_mode_previous.get(name, False)]
+    if newly:
+        selected = newly[0]
+        for name, control in modes.items():
+            if name != selected:
+                control.checked = False
+    _edit_mode_previous.update({name: control.checked for name, control in modes.items()})
+    if not cb_move_collider.checked:
+        COLLIDER_EDITS.drag = None
+    if not cb_move_actor.checked and _move_actor_mode_active:
+        _clear_move_actor_state()
+        _move_actor_mode_active = False
+
+
+def _selected_triangle():
+    if not _triangle_selection or not _snapshot:
+        return None
+    record = _triangle_selection
+    mesh = _snapshot['meshes'].get(record['slot'])
+    if (mesh is None or mesh['bgw'] != record['bgw'] or mesh['pm_bgd'] != record['pm_bgd'] or
+            not 0 <= record['index'] < mesh['t_num']):
+        return None
+    return mesh, record['index']
+
+
+def _update_triangle_inspector():
+    global _triangle_ui_key, _cache, _exit_projection_key, _hardware_mesh_key, _hardware_dynamic_key
+    controls = (triangle_info, triangle_field, triangle_value, triangle_read,
+                triangle_shared, triangle_edit_help, triangle_apply, triangle_fields_help)
+    for control in controls:
+        control.visible = cb_floor_inspector.checked
+    if not cb_floor_inspector.checked:
+        return
+    selected = _selected_triangle()
+    if selected is None:
+        triangle_info.set('Click a collision triangle.')
+        # Consume old button presses even when the selected scene vanished.
+        _ = triangle_apply.clicked
+        _ = triangle_read.clicked
+        return
+    mesh, index = selected
+    try:
+        tri, words, users = inspect_triangle(RD, mesh, index)
+        values = decode_properties(words)
+        key = (_triangle_selection['slot'], index, tri, words, users)
+        if key != _triangle_ui_key:
+            normal = mesh['normals'][index]
+            text = ('BG %d / triangle %d / Ti %d / group %d / %d triangles share Ti\n'
+                    'Normal: %.5f, %.5f, %.5f\n'
+                    'exit=%d  ground=%d  special=%d  attribute=%d  material=%d  link-through=%d\n'
+                    'info0=%08X  info1=%08X  info2=%08X  info3=%08X') % (
+                        _triangle_selection['slot'], index, tri[3], tri[4], users, *normal,
+                        values['exit_id'], values['ground_code'], values['special_code'],
+                        values['attribute_code'], values['material_sound'], values['link_through'], *words)
+            triangle_info.set(text)
+            if _triangle_ui_key is None:
+                field_name = triangle_field.value.strip().lower()
+                if field_name in values:
+                    triangle_value.value = str(values[field_name])
+            _triangle_ui_key = key
+        field = triangle_field.value.strip().lower()
+        if triangle_read.clicked:
+            if field not in values:
+                raise ValueError('Unknown property: ' + field)
+            triangle_value.value = ('0x%08X' if field.startswith('info') else '%d') % values[field]
+        if triangle_apply.clicked:
+            tid, affected = write_triangle_property(memory, mesh, _triangle_selection['slot'], index,
+                                                    field, triangle_value.value.strip(), triangle_shared.checked, _snapshot["meshes"].values())
+            _cache = None
+            _hardware_mesh_key = _hardware_dynamic_key = None
+            _exit_projection_key = None
+            _triangle_ui_key = None
+            _refresh_live(force=True)
+            if tid!=tri[3]:
+                status.set('Copied Ti %d to Ti %d; triangle %d now references Ti %d; updated %s'%
+                           (tri[3],tid,index,tid,field))
+            else:status.set('Updated triangle property %s; Ti=%d; %d physical triangles affected' % (field, tid, affected))
+    except Exception as exc:
+        status.set('Triangle inspector: ' + str(exc))
+
+
+def _queue_floor_tools(camera):
+    if cb_floor_ray.checked and _floor_query and _floor_query['valid']:
+        origin = _floor_query['origin']
+        if _floor_query['floor']:
+            hit = (origin[0], _floor_query['height'], origin[2])
+            _queue_line(origin, hit, C_LINK)
+            _queue_marker(hit, _screen_marker_radius(camera, hit, 5, 2, 60), C_LINK)
+            _queue_marker(origin, _screen_marker_radius(camera, origin, 4, 2, 40), 0xFFFFFF33)
+            slot, index = _floor_query['floor']
+            mesh = _snapshot['meshes'].get(slot)
+            if mesh and index < mesh['t_num']:
+                points = [mesh['verts'][v] for v in mesh['tris'][index][:3]]
+                for i in range(3):
+                    _queue_face_outline_edge(camera, points[i], points[(i+1)%3], C_LINK)
+        else:
+            # No finite game floor: draw a dashed, visibly truncated diagnostic ray.
+            length = max(1500.0, radius_slider.value or 12000.0)
+            for i in range(16):
+                _queue_line(_add_scaled(origin, (0,-1,0), i*length/16),
+                            _add_scaled(origin, (0,-1,0), (i+0.5)*length/16), C_LINK)
+    selected = _selected_triangle() if cb_floor_inspector.checked else None
+    if selected:
+        mesh, index = selected
+        points = [mesh['verts'][v] for v in mesh['tris'][index][:3]]
+        for i in range(3):
+            _queue_face_outline_edge(camera, points[i], points[(i+1)%3], C_VERTEX_FACE)
+
+
+def _draw_floor_ray_hud(hud):
+    if not cb_floor_ray.checked or _clean_capture:
+        return
+    y = 146 if cb_seams.checked else 54
+    if not _floor_query or not _floor_query['valid']:
+        hud.text((14,y), C_LINK, 'Floor query unavailable')
+        return
+    q = _floor_query
+    text = ('Leaf glide' if q['gliding'] else 'Floor query')
+    text += ' | BG %d / triangle %d | Y %.3f' % (*q['floor'], q['height']) if q['floor'] else ' | no accepted floor'
+    hud.text((14,y), C_LINK, text)
+    hud.text((14,y+18), C_LINK, 'Engine origin: %.2f, %.2f, %.2f | roof undersides skipped' % q['origin'])
+
+
+def _queue_leaf_exit_projection(camera):
+    global _exit_projection_key, _exit_projection, _exit_projection_error
+    global _exit_render_key, _exit_render_positions, _exit_render_colors
+    global _exit_geometry_revision
+    if not cb_load.checked or not _snapshot:
+        return
+    q = _floor_query or {}
+    filters = (q.get('flags',3), q.get('group_mask',1), q.get('link_pass',True), q.get('actor_pid'))
+    key = (tuple((slot,id(mesh)) for slot,mesh in sorted(_snapshot['meshes'].items())), filters)
+    if key != _exit_projection_key:
+        previous_projection = _exit_projection
+        try:
+            candidates = ground_candidates(_snapshot['meshes'], *filters)
+            _exit_projection = exit_projection_cells(candidates, cache=_exit_triangle_cache)
+            _exit_projection_error = ''
+        except Exception as exc:
+            _exit_projection = []
+            _exit_projection_error = str(exc)
+            status.set('Leaf exit projection: ' + str(exc))
+        if (len(previous_projection)!=len(_exit_projection) or
+                any(a is not b for a,b in zip(previous_projection,_exit_projection))):
+            _exit_geometry_revision += 1
+        leaf_exit_help.set(('Projection unavailable: ' + _exit_projection_error)
+                           if _exit_projection_error else LEAF_EXIT_HELP)
+        _exit_projection_key = key
+    origin_offset = q.get('origin_offset',60.0)
+    query_y = q.get('origin', (0, (_link or camera.position)[1]+origin_offset, 0))[1]
+    columns = cb_leaf_columns.checked
+    extent = max(2000.0, radius_slider.value or 12000.0)
+    # A stable display range avoids rebuilding open columns on every camera step.
+    clip_top = (math.floor(max(camera.position[1],query_y)/extent)+2)*extent
+    render_key = (_exit_geometry_revision,origin_offset,columns,clip_top if columns else query_y)
+    if render_key != _exit_render_key:
+        positions,colors = array('f'),array('I')
+        def triangle(a,b,c):
+            positions.extend(a); positions.extend(b); positions.extend(c)
+            colors.extend((C_LOAD,C_LOAD,C_LOAD))
+        if not columns:
+            # The expensive exit/blocker partition is independent of Link's
+            # movement. Only take a cheap cross-section when his query Y changes.
+            y = query_y-origin_offset
+            for poly in exit_slice_polygons(_exit_projection,query_y):
+                points = [(p[0],y,p[1]) for p in poly]
+                for i in range(1,len(points)-1):
+                    triangle(points[0],points[i+1],points[i])
+        else:
+            for cell in _exit_projection:
+                base,poly,ceiling = cell['base'],cell['polygon'],cell['ceiling']
+                lower = tuple((p[0],_plane_height(base['plane'],p)-origin_offset,p[1]) for p in poly)
+                upper = tuple((p[0],min(clip_top,_plane_height(ceiling,p)-origin_offset)
+                               if ceiling is not None else clip_top,p[1]) for p in poly)
+                if all(upper[i][1]<=lower[i][1]+0.001 for i in range(len(poly))):
+                    continue
+                for i in range(1,len(poly)-1):
+                    triangle(lower[0],lower[i+1],lower[i])
+                    if ceiling is not None:
+                        triangle(upper[0],upper[i],upper[i+1])
+                for i in range(len(poly)):
+                    j=(i+1)%len(poly)
+                    triangle(lower[i],lower[j],upper[j])
+                    triangle(lower[i],upper[j],upper[i])
+        _exit_render_positions,_exit_render_colors = positions,colors
+        _exit_render_key = render_key
+    # Always filled, independently of the other trigger-volume toggle. Retain
+    # the world geometry and let the renderer handle camera projection/culling.
+    _volume_positions.extend(_exit_render_positions)
+    _volume_colors.extend(_exit_render_colors)
+
+
+def _ensure_collider_move_watch(address=None):
+    global _move_collider_watch_ready, _move_collider_watch_key
+    addresses = set(COLLIDER_EDITS.offsets)
+    if address is not None:
+        addresses.add(address)
+    key = tuple(sorted(addresses))
+    if _move_collider_watch_ready and key == _move_collider_watch_key:
+        return True
+    if not _collider_watch_ready:
+        status.set('Collider movement requires this Dolphin build\'s memory-watch support')
+        return False
+    try:
+        # This fork evaluates conditions before the count store. Set has already
+        # written mpObj[old_count], so filter here before entering Python.
+        count = 'read_u32(0x%X)' % (CCS_BASE+0x280C)
+        pointer = 'read_u32(0x%X+4*%s)' % (CCS_BASE+0x1400,count)
+        matches = ' || '.join('%s == 0x%X' % (pointer,item) for item in key) or '0'
+        condition = '%s < 1280 && (%s)' % (count,matches)
+        debug.set_memory_watch({'At': CCS_BASE+0x280C, 'WatchOnRead': False,
+                                'WatchOnWrite': True, 'Condition': condition})
+        _move_collider_watch_ready = True
+        _move_collider_watch_key = key
+        return True
+    except Exception as exc:
+        status.set('Could not hook collider registration: ' + str(exc))
+        return False
+
+
+def _sync_moved_collider_shapes():
+    if not COLLIDER_EDITS.offsets:
+        return
+    fresh = {}
+    for address in list(COLLIDER_EDITS.offsets):
+        try:
+            COLLIDER_EDITS.apply_registration(address)
+            _raw, shape, _identity = COLLIDER_EDITS.read(address)
+            fresh[address] = shape
+        except Exception:
+            continue
+    for shapes in (_push_colliders, _attack_colliders, _target_colliders):
+        for i, shape in enumerate(shapes):
+            address = COLLIDER_EDITS.addresses.get(shape)
+            if address in fresh:
+                shapes[i] = fresh[address]
+    for address, shape in fresh.items():
+        COLLIDER_EDITS.track(address, b'', shape)
+
+
+def _selected_collider():
+    address = COLLIDER_EDITS.selected
+    if address is None:
+        return None
+    try:
+        _raw, shape, identity = COLLIDER_EDITS.read(address)
+        if COLLIDER_EDITS.selected_identity is not None and identity != COLLIDER_EDITS.selected_identity:
+            raise ValueError('selected collider was replaced')
+        return shape
+    except Exception:
+        COLLIDER_EDITS.selected = COLLIDER_EDITS.drag = None
+        return None
+
+
+def _remove_move_collider_watch():
+    global _move_collider_watch_ready, _move_collider_watch_key
+    if not _move_collider_watch_ready:
+        return
+    for remove in (getattr(memory, 'remove_memcheck', None), getattr(debug, 'remove_memory_breakpoint', None)):
+        if remove is not None:
+            try:
+                remove(CCS_BASE+0x280C)
+                _move_collider_watch_ready = False
+                _move_collider_watch_key = None
+                return
+            except Exception:
+                pass
+
+
+def _apply_collider_flag_locks():
+    global _applying_collider_flags
+    if _applying_collider_flags:return
+    _applying_collider_flags=True
+    try:
+        for address in list(COLLIDER_EDITS.flag_locks):COLLIDER_EDITS.apply_flag_locks(address)
+    finally:_applying_collider_flags=False
+
+
+def _sync_registration_watch():
+    global _collider_registration_watch
+    needed=(any(r.get('registration') for r in COLLIDER_EDITS.flag_locks.values()) or
+            any(r.get('follow') for r in COLLIDER_EDITS.offsets.values()))
+    if not needed:
+        if _collider_registration_watch is not None:
+            debug.remove_memory_breakpoint(_collider_registration_watch)
+            _collider_registration_watch=None
+        return
+    if _collider_registration_watch is not None:return
+    # GZLJ01 CalcArea: first lfs initializes the local AABB before either loop.
+    # Reading mObjCount would be too late: MMU::Read captures its return value
+    # before notifying a watch. This constant's captured value stays unchanged.
+    if bytes(memory.read_bytes(0x80000000,6))!=b'GZLJ01' or memory.read_u32(0x80241F04)!=0xC002BEC8:
+        raise ValueError('Registration hook requires the verified GZLJ01 CalcArea code')
+    site=(registers.read_gpr(2)-0x4138)&0xFFFFFFFF
+    if not _valid_ptr(site):raise ValueError('Invalid SDA2 address for registration hook')
+    debug.set_memory_watch({'At':site,'WatchOnRead':True,'WatchOnWrite':False,
+                            'Condition':'pc == 0x80241F04 && r31 == 0x%X'%CCS_BASE})
+    _collider_registration_watch=site
+
+
+def _register_locked_colliders():
+    try:
+        # Queue membership is checked on the CPU thread, not from cached labels.
+        owners={};head=bytes(memory.read_bytes(ACTOR_QUEUE,12))
+        node,count=_u32(head,0),_u32(head,8)
+        if count>4096:raise ValueError('Invalid actor queue count')
+        seen=set()
+        for _ in range(count):
+            if not _valid_ptr(node) or node in seen:raise ValueError('Invalid actor queue')
+            seen.add(node);entry=bytes(memory.read_bytes(node,0x14))
+            owner,node=_u32(entry,0xC),_u32(entry,8)
+            if _valid_ptr(owner):owners[owner]=memory.read_u32(owner+4)
+        for address,record in list(COLLIDER_EDITS.offsets.items()):
+            following=record.get('follow')
+            if following is None:continue
+            owner,pid=record['identity'][:2]
+            if owners.get(following['actor'])!=following['pid'] or (owner and owners.get(owner)!=pid):
+                COLLIDER_EDITS.offsets.pop(address,None);continue
+            COLLIDER_EDITS.apply_registration(address)
+        COLLIDER_EDITS.apply_registrations(CCS_BASE,owners)
+    except Exception as exc:
+        COLLIDER_EDITS.last_error=str(exc)
+        for address,record in list(COLLIDER_EDITS.flag_locks.items()):
+            if record.get('registration'):COLLIDER_EDITS.flag_locks.pop(address,None)
+        for address,record in list(COLLIDER_EDITS.offsets.items()):
+            if record.get('follow'):COLLIDER_EDITS.offsets.pop(address,None)
+
+
+def _sync_collider_flag_watches():
+    wanted=COLLIDER_EDITS.flag_watch_addresses()
+    for address in _collider_flag_watches-wanted:
+        debug.remove_memory_breakpoint(address)
+    for address in wanted-_collider_flag_watches:
+        debug.set_memory_watch({'At':address,'WatchOnRead':True,'WatchOnWrite':False})
+    _collider_flag_watches.clear();_collider_flag_watches.update(wanted)
+
+
+def _update_collider_tools():
+    global _state_load_overlay_snapshot
+    if not COLLIDER_EDITS.offsets:
+        _remove_move_collider_watch()
+    else:
+        _ensure_collider_move_watch()
+    _apply_collider_flag_locks()
+    try:
+        _sync_collider_flag_watches()
+        _sync_registration_watch()
+    except Exception as exc:status.set('Collider flag watch: '+str(exc))
+    for control in (collider_move_info, collider_restore, collider_restore_all):
+        control.visible = cb_move_collider.checked
+    if not cb_move_collider.checked:
+        return
+    if collider_restore_all.clicked:
+        _state_load_overlay_snapshot = None
+        COLLIDER_EDITS.clear(restore=True)
+        _refresh_runtime_overlays(force=True,recover_registry=True)
+    if collider_restore.clicked and COLLIDER_EDITS.selected is not None:
+        _state_load_overlay_snapshot = None
+        COLLIDER_EDITS.restore(COLLIDER_EDITS.selected)
+        _refresh_runtime_overlays(force=True,recover_registry=True)
+    shape = _selected_collider()
+    if shape is None:
+        collider_move_info.set('Click a visible push/attack/target collider. Drag the selected center or X/Y/Z axes.')
+    else:
+        center,_radius = _collider_center(shape)
+        record = COLLIDER_EDITS.offsets.get(COLLIDER_EDITS.selected)
+        offset = record['offset'] if record else (0,0,0)
+        owner_text='owner %08X' % shape[1] if shape[1] else 'No actor owner'
+        collider_move_info.set('%s @ %08X | %s\nCenter: %.2f, %.2f, %.2f\nOffset from source shape: %.2f, %.2f, %.2f' %
+                               (shape[0],COLLIDER_EDITS.selected,owner_text,*center,*offset))
+
+
+def _toggle_collider_lock(kind):
+    global _state_load_overlay_snapshot
+    if _selected_collider() is None:return
+    if kind=='link':
+        try:
+            if not _collider_watch_ready:raise ValueError('Position lock requires memory-watch support')
+            enabled=COLLIDER_EDITS.toggle_follow_player(COLLIDER_EDITS.selected,PLAYER_PTR)
+            try:
+                _sync_registration_watch()
+                if enabled and not _ensure_collider_move_watch():raise ValueError('Could not hook collider movement')
+            except Exception:
+                if enabled:COLLIDER_EDITS.offsets[COLLIDER_EDITS.selected]['follow']=None
+                raise
+            status.set('Link lock %s; preserves relative position and capsule rotation.' % ('enabled' if enabled else 'disabled'))
+        except Exception as exc:status.set('Collider position lock: '+str(exc))
+    else:
+        try:
+            if not _collider_watch_ready:raise ValueError('Flag locks require memory-watch support')
+            enabled=COLLIDER_EDITS.toggle_flag_lock(COLLIDER_EDITS.selected,kind)
+            try:_sync_registration_watch()
+            except Exception:
+                if enabled and kind=='registration':COLLIDER_EDITS.toggle_flag_lock(COLLIDER_EDITS.selected,kind)
+                raise
+            _sync_collider_flag_watches()
+            status.set('Collider %s lock %s' % (kind,'enabled' if enabled else 'disabled'))
+        except Exception as exc:status.set('Collider flag lock: '+str(exc))
+    _state_load_overlay_snapshot=None
+
+
+def _pick_runtime_collider(camera,click):
+    ray=_screen_ray(camera,click);best=None
+    for control,shapes in ((cb_push,_push_colliders),(cb_attack,_attack_colliders),(cb_target,_target_colliders)):
+        if not control.checked:continue
+        for shape in shapes:
+            address=COLLIDER_EDITS.addresses.get(shape)
+            if address is None:continue
+            distance=_ray_collider_hit(camera.position,ray,shape)
+            if distance is not None and (best is None or distance<best[0]):best=(distance,address)
+    return best[1] if best else None
+
+
+def _select_runtime_collider(address):
+    if address is None:
+        COLLIDER_EDITS.selected=COLLIDER_EDITS.selected_identity=COLLIDER_EDITS.drag=None
+    else:
+        _raw,_shape,identity=COLLIDER_EDITS.read(address)
+        COLLIDER_EDITS.selected=address;COLLIDER_EDITS.selected_identity=identity;COLLIDER_EDITS.drag=None
+
+
+
+
+
+
+def _move_collider_hud_layout():
+    if COLLIDER_EDITS.selected is not None:
+        top=min(150.0,max(10.0,H-322.0))
+        return (10.0,top,430.0,top+312.0)
+    return (10.0,150.0,420.0,216.0)
+
+
+def _selected_collider_hud_info():
+    shape=_selected_collider()
+    if shape is None:
+        return None
+    record=COLLIDER_EDITS.offsets.get(COLLIDER_EDITS.selected,{})
+    flags=COLLIDER_EDITS.flag_locks.get(COLLIDER_EDITS.selected,{})
+    return (shape[0],COLLIDER_EDITS.selected,shape[1],_collider_center(shape)[0],
+            record.get('offset',(0,0,0)),record.get('frozen') is not None,
+            bool(flags.get('state')),bool(flags.get('hit')),bool(flags.get('registration')),bool(record.get('follow')))
+
+
+def _collider_lock_button_rects():
+    x0,y0,x1,_y1=_move_collider_hud_layout()
+    mid=(x0+x1)*0.5
+    return tuple((kind,(left,y0+240+row*34,right,y0+268+row*34))
+                 for row,pair in enumerate((('state','hit'),('registration','link')))
+                 for kind,left,right in ((pair[0],x0+10,mid-3),(pair[1],mid+3,x1-10)))
+
+
+def _draw_move_collider_hud(hud,camera,info):
+    if not cb_move_collider.checked or _clean_capture:
+        return
+    x0,y0,x1,y1=_move_collider_hud_layout()
+    outline,panel_bg,text,button=0xFF3C9CFF,0xE610315D,0xFFF2F7FF,0xFF1B568D
+    hud.rect_filled((x0,y0),(x1,y1),panel_bg,2).rect((x0,y0),(x1,y1),outline,2,2)
+    if info is None:
+        hud.text((x0+12,y0+12),text,'Collider Selector')
+        hud.text((x0+12,y0+34),text,'Click a visible push / attack / target shape')
+        return
+    kind,address,owner,center,offset,frozen,state_lock,hit_lock,registration_lock,link_lock=info
+    hud.text((x0+12,y0+10),text,'Collider Selector: '+kind)
+    owner_text='Owner: %08X' % owner if owner else 'No actor owner'
+    hud.text((x0+12,y0+34),text,'Address: %08X   %s' % (address,owner_text))
+    hud.text((x0+12,y0+58),text,'Center: X=%.3f  Y=%.3f  Z=%.3f' % center)
+    hud.text((x0+12,y0+80),text,'Offset: X=%.3f  Y=%.3f  Z=%.3f' % offset)
+    titles=('Unfreeze Collider' if frozen else 'Freeze Collider',
+            'Teleport Collider to Link','Teleport Link to Collider','Copy Shape XYZ Addresses')
+    for rect,title in zip(_move_actor_button_rects(_move_collider_hud_layout()),titles):
+        hud.rect_filled((rect[0],rect[1]),(rect[2],rect[3]),button,2)
+        hud.text((rect[0]+80,rect[1]+5),text,title)
+    for (_key,rect),label,enabled in zip(_collider_lock_button_rects(),
+            ('State lock','Hit lock','Registration lock','Link pos/rot' if kind=='capsule' else 'Link position'),
+            (state_lock,hit_lock,registration_lock,link_lock)):
+        hud.rect_filled((rect[0],rect[1]),(rect[2],rect[3]),0xFF245C45 if enabled else button,2)
+        hud.text((rect[0]+8,rect[1]+5),text,'%s: %s'%(label,'ON' if enabled else 'off'))
+    projected=camera.project(center)
+    if projected is not None:
+        hud.circle(projected[0],MOVE_ACTOR_CENTER_RADIUS,C_MOVE_CENTER,2.5)
+
+
+def _move_selected_collider_to(destination):
+    global _state_load_overlay_snapshot
+    shape=_selected_collider()
+    if shape is None or not _ensure_collider_move_watch(COLLIDER_EDITS.selected):
+        return False
+    _state_load_overlay_snapshot=None
+    COLLIDER_EDITS.translate(COLLIDER_EDITS.selected,_sub(destination,_collider_center(shape)[0]))
+    _sync_moved_collider_shapes()
+    return True
+
+
+def _handle_move_collider(camera,click):
+    global _state_load_overlay_snapshot
+    if not cb_move_collider.checked or _clean_capture:
+        return False
+    shape = _selected_collider()
+    center = _collider_center(shape)[0] if shape else None
+    if click:
+        x0,y0,x1,y1=_move_collider_hud_layout()
+        if x0<=click[0]<=x1 and y0<=click[1]<=y1:
+            COLLIDER_EDITS.drag=None
+            if shape is not None:
+                for kind,rect in _collider_lock_button_rects():
+                    if rect[0]<=click[0]<=rect[2] and rect[1]<=click[1]<=rect[3]:
+                        _toggle_collider_lock(kind)
+                        return True
+                for index,rect in enumerate(_move_actor_button_rects((x0,y0,x1,y1))):
+                    if not (rect[0]<=click[0]<=rect[2] and rect[1]<=click[1]<=rect[3]):
+                        continue
+                    try:
+                        if index==0 and _ensure_collider_move_watch(COLLIDER_EDITS.selected):
+                            _state_load_overlay_snapshot=None
+                            COLLIDER_EDITS.toggle_freeze(COLLIDER_EDITS.selected)
+                        elif index==1 and _link is not None:
+                            _move_selected_collider_to(tuple(_link))
+                        elif index==2:
+                            _teleport_point(center)
+                        elif index==3:
+                            addresses=COLLIDER_EDITS.watch_addresses(COLLIDER_EDITS.selected)
+                            gui.set_clipboard('\n'.join('0x%08X' % address for address in addresses))
+                            status.set('Copied shape XYZ: sphere center / cylinder base / capsule endpoint / triangle vertex / box minimum')
+                    except Exception as exc:
+                        status.set('Collider Selector: '+str(exc))
+                    break
+            return True
+        if center is not None:
+            projected = camera.project(center)
+            if projected and math.dist(click,projected[0]) <= MOVE_ACTOR_CENTER_RADIUS:
+                depth=max(camera.near,_dot(_sub(center,camera.position),camera.forward))
+                hit=_camera_depth_hit(camera,click,depth)
+                if hit:
+                    COLLIDER_EDITS.drag=dict(kind='plane',depth=depth,offset=_sub(center,hit),origin=center)
+                return True
+            for vector in ((1,0,0),(0,1,0),(0,0,1)):
+                geometry=_move_actor_axis_geometry(camera,center,vector)
+                if geometry:
+                    a,b,_world=geometry
+                    t,distance=_edge_point(click,a,b)
+                    if t>0.18 and distance <= MOVE_ACTOR_AXIS_PICK_RADIUS**2:
+                        parameter=_ray_axis_parameter(camera,click,center,vector)
+                        if parameter is not None:
+                            COLLIDER_EDITS.drag=dict(kind='axis',origin=center,vector=vector,parameter=parameter)
+                        return True
+        _select_runtime_collider(_pick_runtime_collider(camera,click))
+        return True
+    drag=COLLIDER_EDITS.drag
+    if not drag or center is None: return False
+    x,y,inside=canvas.mouse_pos()
+    if not canvas.left_down() or not inside:
+        COLLIDER_EDITS.drag=None
+        return True
+    if drag['kind']=='plane':
+        hit=_camera_depth_hit(camera,(x,y),drag['depth'])
+        destination=tuple(hit[i]+drag['offset'][i] for i in range(3)) if hit else None
+    else:
+        parameter=_ray_axis_parameter(camera,(x,y),drag['origin'],drag['vector'])
+        destination=_add_scaled(drag['origin'],drag['vector'],parameter-drag['parameter']) if parameter is not None else None
+    if destination:
+        try:
+            _move_selected_collider_to(destination)
+        except Exception as exc:
+            status.set('Collider Selector: ' + str(exc))
+            COLLIDER_EDITS.drag=None
+    return True
+
+
+def _draw_move_collider_gizmo(camera):
+    if not cb_move_collider.checked or _clean_capture:
+        return
+    shape=_selected_collider()
+    if shape is None: return
+    center,_extent=_collider_center(shape)
+    radius=_screen_marker_radius(camera,center,7,4,80)
+    _queue_marker(center,radius,C_MOVE_CENTER)
+    for vector,color in (((1,0,0),C_MOVE_X),((0,1,0),C_MOVE_Y),((0,0,1),C_MOVE_Z)):
+        geometry=_move_actor_axis_geometry(camera,center,vector)
+        if geometry:
+            _queue_line(center,geometry[2],color)
+            _queue_marker(geometry[2],radius,color)
+
+
+def _handle_edit_tools(camera,click):
+    global _triangle_selection, _triangle_ui_key
+    if click and not _clean_capture and 8<=click[0]<=42 and 8<=click[1]<=42:
+        return _pick_seam(camera,click)
+    if cb_move_collider.checked:
+        return _handle_move_collider(camera,click)
+    if cb_floor_inspector.checked:
+        if click and not _clean_capture:
+            face=_pick_collision_face(camera,click)
+            if face:
+                _triangle_selection=face
+                _triangle_ui_key=None
+                return True
+        return False
+    move_changed,consumed=_handle_move_actor(camera,click)
+    if not consumed and not cb_move_actor.checked:
+        vertex_changed,consumed=_handle_vertex_select(camera,click)
+        if not consumed:
+            move_changed=_pick_seam(camera,click) or move_changed
+        move_changed=vertex_changed or move_changed
+    return move_changed
 
 
 try:
