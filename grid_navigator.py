@@ -13,6 +13,13 @@ just keeps pointing the stick at the target (camera-derotated) and releases once
 Link is within STOP_DIST. Meant for closed rooms (~<=20k units across), so it
 opens zoomed in much further than ss_navigator.
 
+The de-rotation runs on `land_steer`, which models the LAND camera
+(`dCamera_c::manualCamera`) with the bit-exact tww_sim port and inverts the bearing
+through the decomp-ported clamped stick decode. `cam_sync` -- the SWIM subject-camera
+model this script used to steer with -- stays as the fallback; see land_steer's
+docstring for what the two disagree about and by how much. The HUD carries an aim
+readout so the choice is visible rather than assumed.
+
 - Scroll to zoom (toward the cursor). No panning — zoom out to see more.
 - Click the grid to set a target; or snap it to Link with the button.
 - Frame advance reads live state and drives the stick; host updates own all
@@ -31,13 +38,22 @@ from ww.mathutils import deg_to_halfword, wrap_deg
 from ww.context.context import set_region
 from ww.context.detect import detect_region
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # so `import cam_sync` resolves
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # so the siblings below resolve
 import cam_sync
+import land_steer
 
 # ── configuration ───────────────────────────────────────────────────
 DEFAULT_VIEW_SPAN = 20_000.0   # world units across the smaller canvas dimension at load
-CAM_PREDICT_STEPS = 1          # 1 = predict next-frame csangle (matches ss_navigator); 0 = stale read
+CAM_PREDICT_STEPS = 1          # cam_sync FALLBACK horizon only (the SWIM convention; land_steer uses its own)
 STOP_DIST         = 30.0       # world units: release the stick once Link is this close to the target
+
+# Ease-in ("glide"): below WALK_CAP units to go, ask for a partial mStickDistance instead of full
+# deflection. The land walk cap is msd*(17*msd) = 17*msd^2 u/frame, so msd = sqrt(dist/17) asks for
+# roughly the remaining distance and Link creeps in rather than blowing through the target at 17
+# u/frame. It does not model deceleration, so a small overshoot is still possible.
+WALK_CAP          = 17.0       # land walk speed cap (u/frame) at full deflection
+MSD_MIN           = 0.12       # floor: mStickDistance <= 0.05 is the game's neutral gate (no input)
+GLIDE_STOP_DIST   = 3.0        # release distance while gliding (full-deflection STOP_DIST is 30)
 GRID_TARGET_PX    = 70.0       # desired on-screen spacing between gridlines (drives the "nice" step)
 SCALE_MIN         = 1.0e-4     # px per world unit (zoom-out limit)
 SCALE_MAX         = 50.0       # px per world unit (zoom-in limit)
@@ -45,6 +61,9 @@ SCALE_MAX         = 50.0       # px per world unit (zoom-in limit)
 CANVAS_W   = 360
 CANVAS_H   = 345
 
+if not land_steer.loaded:
+    print("[grid_navigator] land_steer unavailable (%s) -- falling back to the cam_sync SWIM model"
+          % land_steer.load_error)
 if not cam_sync.loaded:
     print("[grid_navigator] cam_sync tables not loaded: %s" % cam_sync.load_error)
 
@@ -59,6 +78,7 @@ C_FACING   = 0xFFFFFF00   # facing arrow
 C_DEST     = 0xFFFF2222   # target marker
 C_MOVE     = 0xFF38E08A   # active "moving" pulse (green)
 C_PILL_BG  = 0xCC10101A   # status pill background
+C_CAM      = 0xFF7FC7FF   # camera / aim-error readout
 
 # ── view transform: world <-> canvas, zoom-around-cursor, no pan ─────
 
@@ -169,7 +189,8 @@ _btn_here = _panel.button("Set target to Link's position")
 _inp_x   = _panel.input_text("target X", "0")
 _inp_z   = _panel.input_text("target Z", "0")
 _btn_xz  = _panel.button("Set target to X / Z")
-_chk_move = _panel.checkbox("Move toward target")
+_chk_move  = _panel.checkbox("Move toward target")
+_chk_glide = _panel.checkbox("Ease in near target", True)
 
 # ── shared state (emu thread writes _cur_*/_have_state/_facing_hw; host thread
 #    writes _dest_*/_armed). Plain globals under the GIL, same pattern as ss_navigator. ──
@@ -183,7 +204,11 @@ _facing_hw: Optional[int] = None
 _have_state: bool = False
 
 _armed: bool = False         # host-thread latch of the "Move toward target" checkbox
-_at_target: bool = False     # set by the emu thread when within STOP_DIST (for the HUD)
+_glide: bool = True          # host-thread latch of the "Ease in near target" checkbox
+_at_target: bool = False     # set by the emu thread when within the release distance (for the HUD)
+_cam_line: str = ""          # emu-thread-rendered camera/aim readout (host thread only reads it)
+_monitor = land_steer.AimMonitor()
+_prev_pos: Optional[Tuple[float, float]] = None   # last frame's (x, z), for the track metric
 _anim: int = 0               # host-side tick for the canvas pulse
 _centered: bool = False      # one-shot: centre the view on Link the first time we can
 
@@ -195,29 +220,100 @@ def _set_main(sx: int, sy: int) -> None:
     controller.set_gc_buttons(0, inp)
 
 
+def _msd_for(dist: float) -> float:
+    """Requested mStickDistance for `dist` units still to go. Full deflection until the remaining
+    distance is under one full-speed frame, then sqrt(dist / WALK_CAP) so the commanded speed cap
+    (17*msd^2) tracks what is actually left. See the GLIDE constants."""
+    if not _glide or dist >= WALK_CAP:
+        return 1.0
+    return max(MSD_MIN, math.sqrt(dist / WALK_CAP))
+
+
 def _drive_toward(cur_x: float, cur_z: float) -> None:
-    """Push the main stick full-deflection at the world bearing to the target,
-    de-rotated for the (predicted) camera. Emu-thread only (memory + controller)."""
-    global _at_target
-    if not cam_sync.loaded:
-        return
-    if mathutils.dist2d(cur_x, cur_z, _dest_x, _dest_z) <= STOP_DIST:
+    """Point the main stick at the world bearing to the target, de-rotated for the camera as it
+    will stand when the game DECODES the stick (not as it stands now). Emu-thread only (memory +
+    controller).
+
+    Preferred path is land_steer: the bit-exact `manualCamera` integrator seeded from live RAM,
+    inverted through the decomp-ported clamped stick decode. It falls back to cam_sync's SWIM
+    model whenever the sim import failed or the camera pointer chain is unreadable -- so the
+    script still steers (less accurately) on a frame where the camera is between instances."""
+    global _at_target, _cam_line, _prev_pos
+
+    dist = mathutils.dist2d(cur_x, cur_z, _dest_x, _dest_z)
+    if dist <= (GLIDE_STOP_DIST if _glide else STOP_DIST):
         _at_target = True
+        _prev_pos = None
         return   # within threshold: leave the stick centred (set_gc_buttons auto-clears)
     _at_target = False
 
     bearing_deg = wrap_deg(math.degrees(math.atan2(_dest_x - cur_x, _dest_z - cur_z)))
     bearing_hw  = deg_to_halfword(bearing_deg) & 0xFFFF
 
+    # Where Link actually went since last frame vs where he was told to go -- the one end-to-end
+    # number, and the only one that catches a PREDICT_STEPS that is a frame out (land_steer.track).
+    if _prev_pos is not None:
+        _monitor.track(cur_x - _prev_pos[0], cur_z - _prev_pos[1], dist)
+    _prev_pos = (cur_x, cur_z)
+
     inp = controller.get_gc_buttons(0)
     csx, csy = int(inp.get("CStickX", 128)), int(inp.get("CStickY", 128))
-    (msx, msy), _pred = cam_sync.charge_stick(bearing_hw, csx, csy, CAM_PREDICT_STEPS)
-    _set_main(msx, msy)
+    msd = _msd_for(dist)
+
+    if land_steer.loaded:
+        cam = land_steer.read_cam()
+        (msx, msy), pred = land_steer.stick_for_world_bearing(bearing_hw, csx, csy,
+                                                              msd=msd, cam=cam)
+        if pred is not None:
+            _monitor.submit(bearing_hw, (msx, msy), pred)
+            _cam_line = _describe_cam(cam, msd)
+            _set_main(msx, msy)
+            return
+        _cam_line = "camera unreadable - cam_sync fallback"
+
+    if cam_sync.loaded:
+        (msx, msy), _pred = cam_sync.charge_stick(bearing_hw, csx, csy, CAM_PREDICT_STEPS)
+        _set_main(msx, msy)
+
+
+def _describe_cam(cam, msd: float) -> str:
+    """Render the camera/aim readout to a string ON THE EMU THREAD. Everything it summarises is
+    written from this thread, so handing the drawing thread a finished string keeps it from
+    iterating an AimMonitor deque while a frame is appending to it."""
+    if cam is None:
+        return "camera unreadable"
+    style = cam["style_name"] or ("style %d" % cam["style"])
+    if cam["dmc"]:
+        note = " DMC(frozen)"
+    elif cam["mode"] != land_steer.MODE_MANUAL:
+        note = " mode %d(blip)" % cam["mode"]
+    else:
+        note = ""
+    if land_steer.last_extrapolated:
+        note += " cs:hold"       # the pad history could not cover the horizon; assumed a hold
+    return "%s %.0f°/f%s  msd %.2f  %s" % (style, cam["scale"], note, msd, _monitor.text())
 
 
 # ── memory read + stick drive (emu thread only) ─────────────────────
 def _read_state() -> None:
-    global _cur_x, _cur_z, _facing_hw, _have_state, _at_target
+    global _cur_x, _cur_z, _facing_hw, _have_state, _at_target, _cam_line
+
+    # Score first, drive second: the csangle standing at the top of this frame is the one the
+    # stick submitted `horizon` frames ago is being decoded against, so ticking here -- before
+    # this frame's submit -- is what lines the monitor's ages up with reality.
+    if land_steer.loaded:
+        # Unconditionally, every frame, before anything predicts: the camera consumes PAST pads, so
+        # the prediction wants the real history, not an assumed hold. A gap here (skipping the push
+        # on an idle frame) would shift every entry onto the wrong frame -- worse than no history.
+        try:
+            _inp = controller.get_gc_buttons(0)
+            land_steer.push_cstick(int(_inp.get("CStickX", 128)), int(_inp.get("CStickY", 128)))
+        except Exception:
+            land_steer.reset_cstick()
+        cam = land_steer.read_cam()
+        _monitor.tick(cam["csangle"] if cam else None)
+        if not _armed:
+            _cam_line = _describe_cam(cam, 1.0)
 
     # Rebuild the Player each frame: its gptr is recreated across stage/room
     # transitions, so a cached instance would read a stale base. Cheap (one ptr read).
@@ -229,6 +325,7 @@ def _read_state() -> None:
     if not valid:
         _have_state = False
         _at_target = False
+        land_steer.reset_cstick()      # no Link == a load or a transition: the history is stale
         return
 
     try:
@@ -242,7 +339,7 @@ def _read_state() -> None:
 
 # ── input + draw (host thread; safe while paused) ───────────────────
 def _update_view() -> None:
-    global _dest_x, _dest_z, _dest_set, _armed, _anim, _centered
+    global _dest_x, _dest_z, _dest_set, _armed, _glide, _anim, _centered
 
     _anim += 1
     cur_x, cur_z = _cur_x, _cur_z
@@ -250,6 +347,7 @@ def _update_view() -> None:
     have = _have_state
 
     _armed = _chk_move.checked
+    _glide = _chk_glide.checked
 
     # ── responsive: track the live canvas size ─────────────────────
     try:
@@ -328,19 +426,26 @@ def _update_view() -> None:
             _canvas.line((dx + R, dy - R), (dx - R, dy + R), C_DEST, 2.0)
             _canvas.circle((dx, dy), R, C_DEST, 2.0)
 
-    # ── grid-size pill (top-left) ──────────────────────────────────
+    # ── grid-size pill (top-left), camera/aim readout under it ─────
     grid_label = "Grid: %s u" % _fmt_units(step)
     pill_w = 22.0 + len(grid_label) * 7.0
     _canvas.rect_filled((6, 6), (6 + pill_w, 25), C_PILL_BG, 5.0)
     _canvas.text((12, 10), C_LABEL, grid_label)
+
+    # Rendered on the emu thread (see _describe_cam) -- read-only here.
+    cam_label = _cam_line
+    if cam_label:
+        pill_w = 22.0 + len(cam_label) * 6.5
+        _canvas.rect_filled((6, 29), (6 + pill_w, 48), C_PILL_BG, 5.0)
+        _canvas.text((12, 33), C_CAM, cam_label)
 
     _canvas.commit()
 
     # ── status line ────────────────────────────────────────────────
     if bad_xz:
         _status.set("Bad X/Z — enter numbers")
-    elif not cam_sync.loaded:
-        _status.set("cam_sync tables not loaded — cannot steer (see console)")
+    elif not (land_steer.loaded or cam_sync.loaded):
+        _status.set("neither land_steer nor cam_sync loaded — cannot steer (see console)")
     elif not have:
         _status.set("Waiting for Link…")
     elif _dest_set:
