@@ -1,5 +1,5 @@
 # record_inputs.py
-# Optional input recording; disabled by default to avoid generated log files.
+# Logs inputs from RAM each on_frameadvance.
 # - Controller 1 (GC pad #1): read from ww.game.read_gc_input()
 # - Controller 2 (GBA): read from ww.actors.gba.GBA actor buttons()
 #
@@ -16,7 +16,6 @@ import os
 from ww import game, actor as actor_mod
 from ww.actors.gba import GBA
 
-RECORD_INPUTS = False
 INPUT_DIR = "InputLogs"
 # ---------- file paths ----------
 _GC_CSV  = os.path.join(INPUT_DIR, "controller1_gc_inputs.csv")
@@ -114,9 +113,6 @@ def _gba_row():
 @event.on_frameadvance
 def update():
     global _gc_writer, _gba_writer, _gc_file, _gba_file
-
-    if not RECORD_INPUTS:
-        return
 
     # Lazily open writers
     if _gc_writer is None:
