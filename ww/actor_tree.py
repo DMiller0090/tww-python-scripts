@@ -174,6 +174,7 @@ class ActorTree:
     def _ensure_runtime(self):
         if self.runtime is not None or self.version not in GAME_INFO:
             return
+        self.structs.select_runtime_region(self.version)
         size = self.structs.class_size(RUNTIME_CLASS) or 0x1D1C8
         rt = dict(pid=-1, addr=GAME_INFO[self.version], proc=None, name=RUNTIME_NAME, cond=0, size=size,
                   cls=RUNTIME_CLASS, kind="runtime", layer=None, list=None, rows=None)

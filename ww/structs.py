@@ -66,6 +66,9 @@ class Structs:
     def __init__(self, tables, sizes=None):
         self.classes = {name:dict(cdef,ns=cdef.get('ns','')) for name,cdef in tables['classes'].items()}
         self.canonical=tables.get('canonical',False)
+        self.runtime_regions=tables.get('runtime_regions',{})
+        self._runtime_defaults={name:dict(layout) for name,layout in self.classes.items()
+                                if any(name in region for region in self.runtime_regions.values())}
         for name, cdef in BUILTIN.items():
             have = self.classes.get(name)
             if have is None or not have["f"]:       # the headers describe these without offset comments
@@ -79,6 +82,13 @@ class Structs:
         for q in self.classes:
             self._short.setdefault(q.split("::")[-1], []).append(q)
         self._flat = {}
+
+    def select_runtime_region(self, version):
+        """Select packaged regional layouts without changing field names or reading source files."""
+        overrides=self.runtime_regions.get(version,{})
+        for name,default in self._runtime_defaults.items():
+            self.classes[name]=dict(overrides.get(name,default),ns=default.get('ns',''))
+        self._flat.clear()
 
     KIND_ROOTS = (("fopAc_ac_c", "actor"), ("msg_class", "msg"), ("scene_class", "scene"), ("process_node_class", "scene"),
                   ("camera_class", "camera"), ("kankyo_class", "kankyo"), ("overlap_task_class", "overlap"),
@@ -156,7 +166,9 @@ class Structs:
             for base in cdef["b"]:
                 b = self.resolve(base, cdef["ns"])
                 if b:
-                    out.extend(self.flatten(b, _seen + (cname,)))
+                    offset=cdef.get('bo',{}).get(base,0)
+                    out.extend([[off+offset,typ,name,dims] for off,typ,name,dims
+                                in self.flatten(b, _seen + (cname,))])
             out.extend(cdef["f"])
         self._flat[cname] = out
         return out
@@ -219,7 +231,7 @@ class Structs:
         if dims and dims != [None]:
             el = size // total_dims if total_dims else size
             return Row(off, size, t + "".join("[%s]" % ("?" if d is None else d) for d in dims), name, "array",
-                       fmt=(t, el), count=min(total_dims, 512), path=fpath, cls=self.resolve(t, ns))
+                       fmt=(t, el), count=total_dims, path=fpath, cls=self.resolve(t, ns))
         if t.endswith("*"):
             return Row(off, 4, t, name, "ptr", "I", path=fpath)
         if t in PRIMS:
