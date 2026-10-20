@@ -53,8 +53,8 @@ def inspect_triangle(reader, mesh, index):
     return triangle, struct.unpack('>4I', raw), users
 
 
-def write_triangle_property(memory, mesh, slot, index, field, text, shared=False, meshes=()):
-    """Copy a shared Ti to an unused slot before editing this triangle when possible."""
+def write_triangle_property(memory, mesh, slot, index, field, text, meshes=()):
+    """Edit the existing Ti record for every triangle that references it."""
     # Validate the slot and current DZB pointers before touching scene memory.
     elm = bytes(memory.read_bytes(DBGS + slot * CHK_ELEM_STRIDE, CHK_ELEM_STRIDE))
     bgw, flags = struct.unpack_from('>2I', elm)
@@ -75,7 +75,6 @@ def write_triangle_property(memory, mesh, slot, index, field, text, shared=False
     live = [struct.unpack_from('>5H', raw_tris, i * 10) for i in range(mesh['t_num'])]
     tid = triangle[3]
     users = sum(t[3] == tid for t in live)
-    occupied = {t[3] for t in live}
     seen_tables = {mesh['t_tbl']}
     for other in meshes:
         if other['ti_tbl'] != mesh['ti_tbl'] or other['t_tbl'] in seen_tables:
@@ -83,30 +82,17 @@ def write_triangle_property(memory, mesh, slot, index, field, text, shared=False
         seen_tables.add(other['t_tbl'])
         raw = bytes(memory.read_bytes(other['t_tbl'], other['t_num']*10))
         ids = [struct.unpack_from('>H',raw,i*10+6)[0] for i in range(other['t_num'])]
-        occupied.update(ids)
         users += ids.count(tid)
-    destination = tid
-    if users > 1 and not shared:
-        destination = next((i for i in range(min(65536, mesh['ti_num'])) if i not in occupied), None)
-        if destination is None:
-            raise ValueError('Property record is shared by %d triangles; no unused Ti slot. Enable Edit shared record to affect them all.' % users)
-    addr = mesh['ti_tbl'] + destination * 16
+    addr = mesh['ti_tbl'] + tid * 16
     old = bytes(memory.read_bytes(addr, 16))
-    id_addr = mesh['t_tbl'] + index * 10 + 6
-    old_id = bytes(memory.read_bytes(id_addr, 2))
     try:
         memory.write_bytes(addr, bytearray(struct.pack('>4I', *new)))
-        if destination != tid:
-            memory.write_bytes(id_addr, bytearray(struct.pack('>H', destination)))
         if bytes(memory.read_bytes(addr,16)) != struct.pack('>4I',*new):
             raise ValueError('property write verification failed')
-        if struct.unpack('>H',bytes(memory.read_bytes(id_addr,2)))[0] != destination:
-            raise ValueError('triangle property index write verification failed')
     except Exception:
         memory.write_bytes(addr, bytearray(old))
-        memory.write_bytes(id_addr, bytearray(old_id))
         raise
-    return destination, users if shared else 1
+    return tid, users
 
 
 def read_link_ground_query(reader, actor):

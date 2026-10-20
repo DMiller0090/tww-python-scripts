@@ -40,11 +40,11 @@ from ww.viewer_math import (ViewerCamera, add_scaled as _add_scaled,
                             dot as _dot, forward_from_angles as _forward_from_angles,
                             normalize as _norm, screen_ray as _screen_ray, sub as _sub)
 from ww.soft_canvas import SoftCanvas
+from ww.canvas_scale import HardwareCanvasScale
 
-# "auto": hardware (GPU) canvas on Windows, CPU-canvas software renderer on macOS/other.
-# The hardware canvas is Direct3D 11 on Windows builds of the fork. Use "hardware" to try the
-# fork's OpenGL path on a Mac, or "software" to force the CPU renderer anywhere.
-RENDER_MODE = "auto"
+# "hardware": GPU canvas (OpenGL on macOS, Direct3D 11 on Windows).
+# "auto": GPU on Windows, software elsewhere. "software": CPU canvas everywhere.
+RENDER_MODE = "hardware"
 
 
 class DolphinReader:
@@ -231,7 +231,7 @@ if not SOFTWARE_RENDER:
     try:
         panel.enable_hardware_canvas()
     except Exception:
-        SOFTWARE_RENDER = True  # this build has no hardware canvas; fall back to the CPU canvas
+        SOFTWARE_RENDER = True
 canvas = panel.canvas(W, H)
 if SOFTWARE_RENDER:
     canvas = SoftCanvas(canvas, wire_color=C_WIREFRAME)
@@ -282,8 +282,7 @@ triangle_field = panel.input_text("Property name", "exit_id", group="Tools")
 triangle_value = panel.input_text("Property value", "", group="Tools")
 triangle_read = panel.button("Read property", group="Tools")
 triangle_apply = panel.button("Apply triangle property", group="Tools")
-triangle_shared = panel.checkbox("Edit shared record (affects every user)", False, group="Tools")
-triangle_edit_help = panel.text("Unchecked: if Ti is shared, copy it to an unused property slot and update only this triangle's Ti index. Requires an unused slot. Checked: edit the existing record for every triangle using it. exit_id selects an SCLS entry; the destination is stored in SCLS.", group="Tools", style=TRIANGLE_HELP_STYLE)
+triangle_edit_help = panel.text("Applying a property updates every triangle sharing the property record, even disconnected triangles. exit_id selects an SCLS entry; the destination is stored in SCLS.", group="Tools", style=TRIANGLE_HELP_STYLE)
 cb_filled_triggers = panel.checkbox("Filled triggers", False, group="Triggers")
 trigger_opacity_slider = panel.slider_float("Trigger opacity", 0.0, 1.0, group="Triggers")
 trigger_opacity_slider.value = 0.54
@@ -461,7 +460,7 @@ _state_overlay_history = {}
 _state_load_overlay_snapshot = None
 _last_error = ""
 
-_freecam = {"pos": [0.0, 0.0, 0.0], "az": 38.0, "el": 29.0, "ready": False}
+_freecam = {"pos": [0.0, 0.0, 0.0], "az": 38.0, "el": 29.0, "ready": False, "fovy": DEFAULT_FOVY, "aspect": None}
 _mouse_look = {"active": False, "x": 0.0, "y": 0.0}
 _viewer_fullscreen = False
 _clean_capture = False
@@ -470,6 +469,8 @@ _fullscreen_before_capture = False
 _hardware_mesh_key = None
 _hardware_dynamic_key = None
 _hardware_state_key = None
+_hardware_canvas_scale = HardwareCanvasScale()
+_renderer_note_last = None
 _hardware_line_key = None
 _hardware_on_top_line_key = None
 _hardware_marker_key = None
@@ -559,9 +560,17 @@ def _sync_canvas_size():
 
 
 def _active_focal():
-    fovy = _game_camera[3] if cb_follow_cam.checked and _game_camera is not None else DEFAULT_FOVY
+    fovy = _game_camera[3] if cb_follow_cam.checked and _game_camera is not None else _freecam["fovy"]
     height = min(float(H), float(W) * 0.75) if _clean_capture else float(H)
     return (height * 0.5) / math.tan(math.radians(fovy) * 0.5)
+
+
+def _active_focal_x():
+    focal = _active_focal()
+    aspect = (_game_camera[4] if cb_follow_cam.checked and _game_camera is not None
+              else _freecam['aspect'])
+    viewport_aspect = 4.0 / 3.0 if _clean_capture else float(W) / max(1, H)
+    return focal * viewport_aspect / aspect if aspect is not None else focal
 
 
 def _read_link():
@@ -1266,12 +1275,14 @@ def _refresh_game_camera():
         camera = read_camera(RD)
         eye, target, up = tuple(camera["eye"]), tuple(camera["center"]), tuple(camera["up"])
         fovy = float(camera["fovy"])
+        aspect = float(camera.get("aspect", 4.0/3.0))
         forward = _sub(target, eye)
         if not (all(math.isfinite(value) for value in eye + target + up) and
-                _dot(forward, forward) > 1.0 and 5.0 <= fovy <= 175.0):
+                _dot(forward, forward) > 1.0 and 5.0 <= fovy <= 175.0 and math.isfinite(aspect) and 0.1 <= aspect <= 10.0):
             raise ValueError("invalid camera")
-        _game_camera = (eye, target, up, fovy)
+        _game_camera = (eye, target, up, fovy, aspect)
         if cb_follow_cam.checked:
+            _freecam["fovy"], _freecam["aspect"] = fovy, aspect
             _freecam["pos"][:] = eye
             _freecam["az"], _freecam["el"] = _angles_from_forward(forward)
             _freecam["ready"] = True
@@ -1291,9 +1302,9 @@ def _ensure_freecam():
 
 
 def _viewer_camera():
-    camera_args = {"width": W, "height": H, "focal": _active_focal()}
+    camera_args = {"width": W, "height": H, "focal": _active_focal(), "focal_x": _active_focal_x()}
     if cb_follow_cam.checked and _game_camera is not None:
-        eye, target, up, _ = _game_camera
+        eye, target, up, _, _ = _game_camera
         return ViewerCamera(eye, _sub(target, eye), up, **camera_args)
     _ensure_freecam()
     return ViewerCamera(_freecam["pos"], _forward_from_angles(_freecam["az"], _freecam["el"]),
@@ -1516,7 +1527,7 @@ def _upload_dynamic_mesh():
                            if mesh["is_movebg"])
     # Reupload moveable geometry only when its sampled world pose changes.
     # Empty and disabled dynamic layers are retained instead of recreating an
-    # empty GPU buffer every update, which matters in rooms with no moving collision.
+    # empty geometry layer every update, which matters in rooms with no moving collision.
     enabled = {"ground": cb_ground.checked, "slope": cb_slope.checked,
                "wall": cb_wall.checked, "roof": cb_roof.checked}
     palette = {"ground": C_GROUND, "slope": C_SLOPE, "wall": C_WALL, "roof": C_ROOF}
@@ -1711,10 +1722,9 @@ def _within_draw_radius(camera, point, bounds_radius=0.0):
 def _within_view(camera, point, bounds_radius=0.0):
     """Keep a live volume when its bounding sphere intersects the view bounds.
 
-    The retained stage mesh stays entirely on the GPU, where normal hardware
-    clipping is substantially cheaper than rebuilding it whenever the camera
-    moves. Dynamic actor and trigger overlays are generated in Python, so
-    culling them here avoids geometry generation.
+    Static meshes stay in the software renderer's retained layers. Dynamic actor
+    and trigger overlays are generated in Python, so culling them here avoids
+    unnecessary geometry generation.
     """
     if not cb_view_cull.checked:
         return True
@@ -1726,9 +1736,8 @@ def _within_view(camera, point, bounds_radius=0.0):
     # Use signed distance to the four side planes. A center only test drops
     # large triggers & colliders that overlap the viewport from just offscreen;
     # the sphere/plane test avoids that while still removing off camera work.
-    focal = max(1.0, _active_focal())
-    horizontal_slope = W * 0.5 / focal
-    vertical_slope = H * 0.5 / focal
+    horizontal_slope = camera.width * 0.5 / max(1.0, camera.focal_x)
+    vertical_slope = camera.height * 0.5 / max(1.0, camera.focal)
     horizontal_limit = bounds_radius * math.sqrt(1.0 + horizontal_slope * horizontal_slope)
     vertical_limit = bounds_radius * math.sqrt(1.0 + vertical_slope * vertical_slope)
     horizontal = abs(_dot(relative, camera.right))
@@ -1862,12 +1871,7 @@ def _pick_collision_face(camera, screen_point):
     """Return the nearest enabled collision face below a canvas click."""
     if _snapshot is None:
         return None
-    sx, sy = screen_point
-    focal = _active_focal()
-    ray = _norm(tuple(
-        camera.forward[axis] + camera.right[axis] * (sx - W * 0.5) / focal -
-        camera.up[axis] * (sy - H * 0.5) / focal
-        for axis in range(3)))
+    ray = _screen_ray(camera, screen_point)
     enabled_classes = {
         "ground": cb_ground.checked,
         "slope": cb_slope.checked,
@@ -2159,7 +2163,7 @@ def _commit_overlays():
     overlay_line_colors = _line_colors.tobytes()
     line_positions = b""
     line_colors = b""
-    if cb_wire.checked and not SOFTWARE_RENDER:  # software mode wires the triangles directly
+    if cb_wire.checked and not SOFTWARE_RENDER:
         if cb_enabled.checked:
             line_positions += _static_wire_positions
             line_colors += _static_wire_colors
@@ -2191,9 +2195,18 @@ def _commit_overlays():
         _hardware_volume_key = key
 
 
-def _set_hardware_state(camera):
-    global _hardware_state_key
-    state = (camera.position, camera.right, camera.up, camera.forward, _active_focal(),
+def _set_renderer_state(camera):
+    global _hardware_state_key, _renderer_note_last
+    scale = _hardware_canvas_scale.get(panel, SOFTWARE_RENDER)
+    note = ('Renderer: software (CPU canvas)' if SOFTWARE_RENDER else
+            'Renderer: OpenGL | scale %gx%s' % (scale, ' (query unavailable)' if _hardware_canvas_scale.last_error else '')
+            if sys.platform == 'darwin' else 'Renderer: hardware')
+    if note != _renderer_note_last:
+        renderer_note.set(note)
+        _renderer_note_last = note
+    focal = camera.focal * scale
+    projection_right = tuple(value * camera.focal_x / camera.focal for value in camera.right)
+    state = (camera.position, projection_right, camera.up, camera.forward, focal,
              radius_slider.value, opacity_slider.value, wire_opacity_slider.value,
              trigger_opacity_slider.value, cb_filled.checked, cb_wire.checked, True,
              cb_xray.checked, cb_on_top_triggers.checked, _viewer_fullscreen, _clean_capture,
@@ -2201,7 +2214,7 @@ def _set_hardware_state(camera):
              cb_culling.checked, cb_cull_labels.checked, cb_zone_info.checked)
     if state == _hardware_state_key:
         return
-    canvas.hardware_state(camera.position, camera.right, camera.up, camera.forward, _active_focal(),
+    canvas.hardware_state(camera.position, projection_right, camera.up, camera.forward, focal,
                           radius_slider.value, opacity_slider.value, wire_opacity_slider.value,
                           cb_filled.checked, cb_wire.checked, True, cb_xray.checked,
                           cb_on_top_triggers.checked, _viewer_fullscreen, _clean_capture,
@@ -2342,7 +2355,7 @@ def _draw_zone_flags_hud(hud, camera):
             hud.text((x+4,y-16-len(labels)*16),0xFFE6EDF3,name)
 
 
-def _draw_move_actor_hud(hud):
+def _draw_move_actor_hud(hud, camera):
     if not cb_move_actor.checked or _clean_capture:
         return
     x0, y0, x1, y1 = _move_actor_hud_layout()
@@ -2366,7 +2379,7 @@ def _draw_move_actor_hud(hud):
                         (copy_watches, "Copy XYZ Watch Addresses")):
         hud.rect_filled((rect[0], rect[1]), (rect[2], rect[3]), button, 2)
         hud.text((rect[0] + 100, rect[1] + 5), text, title)
-    projected = _viewer_camera().project(position)
+    projected = camera.project(position)
     if projected is not None:
         hud.circle(projected[0], MOVE_ACTOR_CENTER_RADIUS, C_MOVE_CENTER, 2.5)
 
@@ -2404,7 +2417,7 @@ def _update_overlay_text(camera):
            cb_contact_actor.checked, tuple(_contact_actor_labels),
            cb_move_actor.checked, _move_actor_selected, _selected_actor_hud_info(),
            tuple(sorted((actor, lock["position"]) for actor, lock in _move_actor_locks.items())),
-           cb_coordinate_dot.checked, _link, camera.position, camera.right, camera.up, camera.forward,
+           cb_coordinate_dot.checked, _link, camera.position, camera.right, camera.up, camera.forward, camera.focal, camera.focal_x,
            None if clip is None else (clip["point"], clip["angle"], clip["rollstab"]),
            _normal_xyz_text(_selected_face) if _selected_face is not None else None,
            _normal_angle_lines(_selected_face) if _selected_face is not None else None,
@@ -2475,7 +2488,7 @@ def _update_overlay_text(camera):
     _draw_contact_actor_hud(hud, camera)
     _draw_coordinate_dot_hud(hud, camera)
     _draw_floor_ray_hud(hud)
-    _draw_move_actor_hud(hud)
+    _draw_move_actor_hud(hud, camera)
     _draw_move_collider_hud(hud,camera,collider_info)
     hud.commit()
     _hardware_overlay_key = key
@@ -3026,7 +3039,7 @@ def _draw_scene():
     else:
         _clear_static_mesh()
     _upload_dynamic_mesh()
-    _set_hardware_state(camera)
+    _set_renderer_state(camera)
     _line_positions, _line_colors = array("f"), array("I")
     _marker_positions, _marker_colors = array("f"), array("I")
     _volume_positions, _volume_colors = array("f"), array("I")
@@ -3079,6 +3092,8 @@ def _draw_scene():
     _update_overlay_text(camera)
     if SOFTWARE_RENDER:
         canvas.flush()
+        if canvas.last_error:
+            status.set(canvas.last_error)
 
 
 def _refresh_live(force=False, recover_registry=False):
@@ -3340,7 +3355,7 @@ def _selected_triangle():
 def _update_triangle_inspector():
     global _triangle_ui_key, _cache, _exit_projection_key, _hardware_mesh_key, _hardware_dynamic_key
     controls = (triangle_info, triangle_field, triangle_value, triangle_read,
-                triangle_shared, triangle_edit_help, triangle_apply, triangle_fields_help)
+                triangle_edit_help, triangle_apply, triangle_fields_help)
     for control in controls:
         control.visible = cb_floor_inspector.checked
     if not cb_floor_inspector.checked:
@@ -3377,18 +3392,18 @@ def _update_triangle_inspector():
             if field not in values:
                 raise ValueError('Unknown property: ' + field)
             triangle_value.value = ('0x%08X' if field.startswith('info') else '%d') % values[field]
+        changed = False
         if triangle_apply.clicked:
             tid, affected = write_triangle_property(memory, mesh, _triangle_selection['slot'], index,
-                                                    field, triangle_value.value.strip(), triangle_shared.checked, _snapshot["meshes"].values())
+                                                    field, triangle_value.value.strip(), meshes=_snapshot["meshes"].values())
+            status.set('Updated triangle property %s; Ti=%d; %d physical triangles affected' % (field, tid, affected))
+            changed = True
+        if changed:
             _cache = None
             _hardware_mesh_key = _hardware_dynamic_key = None
             _exit_projection_key = None
             _triangle_ui_key = None
             _refresh_live(force=True)
-            if tid!=tri[3]:
-                status.set('Copied Ti %d to Ti %d; triangle %d now references Ti %d; updated %s'%
-                           (tri[3],tid,index,tid,field))
-            else:status.set('Updated triangle property %s; Ti=%d; %d physical triangles affected' % (field, tid, affected))
     except Exception as exc:
         status.set('Triangle inspector: ' + str(exc))
 

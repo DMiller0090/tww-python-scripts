@@ -46,6 +46,7 @@ from ww.actor import proc_name
 from ww.actor_tree import ActorTree
 from ww.heap_view import HeapView
 from ww.collider_view import ColliderView
+from ww.bg_records import BgRecords, COLUMNS as BG_RECORD_COLUMNS, SUBTABS as BG_SUBTABS
 from ww.world_view import WorldView, BG_COLUMNS, ZONE_COLUMNS, ZONE_SWITCH_COLUMNS
 from ww.flag_view import FlagView, TABLES as FLAG_TABLES, ROW_HEIGHT as FLAG_ROW_H, LABEL_WIDTH as FLAG_LABEL_W
 from ww.collider_properties import FIELDS as COLLIDER_FIELDS
@@ -171,6 +172,7 @@ heap_view = HeapView()
 heap_view.resize(W)
 collider_view = ColliderView(memory,proc_name)
 world_view = WorldView(memory,proc_name)
+bg_records = BgRecords(memory)
 flag_view = FlagView(memory)
 scls_editor = SclsEditor(memory)
 atexit.register(collider_view.close_registry_watch)
@@ -191,7 +193,7 @@ except Exception as exc:
 state = dict(scroll=0, selected=None, tick=0, dirty=True, frame=0, live=True,
              editor=None, next_ui=0.0, next_process=0.0, next_value=0.0, next_heap=0.0,
              heap_split=None,flags_table='story',flag_detail=None,
-             scls_tables={},scls_rows=[])
+             scls_tables={},scls_rows=[],bg_table='meshes')
 if tree is not None:
     tree.set_sort("pid")
     status.set("Click a Value to edit; click Lock to freeze. bsPCID: newest first. End addresses are exclusive.")
@@ -221,13 +223,14 @@ def switch_mode(mode):
         collider_view.refresh(tree)
     elif mode in ('bg','zone'):
         world_view.refresh(tree)
+        if mode=='bg' and state['bg_table']!='meshes':bg_records.refresh(tree,state['tick'])
     elif mode=='flags':refresh_flags()
     elif mode=='scls':refresh_scls()
     else:
         tree.read_snapshots()
     status.set("tab: " + {"runtime": "g_dComIfG_gameInfo: save, play, drawlist, resource control and brightness", "actors": "all processes", "heaps": "GAME / DYN / ACT heaps",
                          "colliders":"collider properties; click a row to expand, then a Value to edit",
-                         "bg":"registered background collisions; click for mesh table details",
+                         "bg":"click mRoomNo or an expanded Value to edit; right-click Address to copy",
                          "zone":"zone mSwitch arrays and actor roomNo/switchNo targets",
                          "flags":"Click a flag cell to enable or disable it. Green: enabled; red: disabled. Merged cells open the value editor.",
                          "scls":"Stage and loaded room lists; click a destination cell to edit. Right-click Start to copy its address."}[mode])
@@ -247,9 +250,10 @@ def sync_controls():
     zone_edit=(mode in ('zone','flags') and isinstance(state['editor'],dict) and 'zone_switch' in state['editor'])
     state_edit=(mode in ('zone','flags') and isinstance(state['editor'],dict) and 'switch_state' in state['editor'])
     flag_edit=(mode=='flags' and isinstance(state['editor'],dict) and 'flag_cell' in state['editor'])
+    bg_edit=(mode=='bg' and isinstance(state['editor'],dict) and ('bg_record' in state['editor'] or 'bg_mesh' in state['editor']))
     scls_edit=(mode=='scls' and isinstance(state['editor'],dict) and 'scls' in state['editor'])
-    world_details.visible=mode in ('bg','zone','flags') and not (zone_edit or state_edit or flag_edit)
-    for control in (edit_info,edit_box,btn_apply):control.visible=mode not in ('heaps','bg','zone','flags','scls') or zone_edit or flag_edit or scls_edit
+    world_details.visible=mode in ('bg','zone','flags') and not (zone_edit or state_edit or flag_edit or bg_edit)
+    for control in (edit_info,edit_box,btn_apply):control.visible=mode not in ('heaps','bg','zone','flags','scls') or zone_edit or flag_edit or scls_edit or bg_edit
     btn_cancel.visible=flag_edit
     if state_edit:edit_info.visible=True
     btn_switch_set.visible=btn_switch_clear.visible=state_edit or flag_edit
@@ -385,6 +389,24 @@ def apply_edit():
     item = state["editor"]
     if item is None:
         status.set("Click an editable Value cell first.")
+        return
+    if isinstance(item,dict) and 'bg_mesh' in item:
+        try:
+            token=item['bg_mesh']
+            world_view.write_bg(tree,token,edit_box.value)
+            cancel_edit()
+            status.set('Updated BG field '+token['label'])
+        except Exception as exc:status.set('BG edit failed: '+str(exc))
+        state['dirty']=True
+        return
+    if isinstance(item,dict) and 'bg_record' in item:
+        try:
+            bg_records.write(tree,item['bg_record'],edit_box.value)
+            bg_records.refresh(tree,state['tick'])
+            cancel_edit()
+            status.set('Updated shared BG record; all users of this record are affected.')
+        except Exception as exc:status.set('BG edit failed: '+str(exc))
+        state['dirty']=True
         return
     if isinstance(item,dict) and 'scls' in item:
         apply_scls_edit(item);return
@@ -647,6 +669,8 @@ def handle_input():
     wheel = canvas.take_wheel()
     click = canvas.take_click()
     right_click = canvas.take_right_click()
+    if tree.mode=='bg' and (not click or click[1]>=TAB_H):
+        handle_bg_input(click,right_click,wheel);return
     if tree.mode=='colliders' and click and TAB_H<=click[1]<TOP:
         handle_collider_action(click[0]);return
     if tree.mode=='flags' and handle_flags_input(click,wheel):return
@@ -691,7 +715,7 @@ def handle_input():
                 except Exception as exc:status.set('Teleport failed: '+str(exc))
                 return
             elif tree.mode=='bg' and COLLAPSE_X-110<=x<COLLAPSE_X:
-                world_view.open_bg.clear();state['scroll']=0
+                world_view.open_bg.clear();bg_records.open.clear();state['scroll']=0
                 return
             elif tree.mode=='heaps' and HEAP_RELEASE_ALL_X<=x<live_x:
                 close_heap_split()
@@ -845,10 +869,128 @@ def draw_colliders():
     if not rows:canvas.text((16,body_top+TEXT_BASE),DIM,'Discovering colliders...')
 
 
+def bg_rows():
+    return world_view.rows('bg') if state['bg_table']=='meshes' else bg_records.rows(state['bg_table'])
+
+
+def begin_bg_mesh_edit(token):
+    if token is None:
+        cancel_edit();status.set('This row describes a location rather than a stored field.')
+        return
+    try:
+        world_view.validate_bg(tree,token)
+        cancel_edit()
+        state['editor']={'bg_mesh':token}
+        value=int.from_bytes(token['raw'],'big',signed=token['format'] in ('i','h','b'))
+        edit_box.value='0x%X'%value if token['hex'] else str(value)
+        help_text='Decimal or 0x hex.'
+        if token['label']=='mRoomNo':help_text+=' 65535 / 0xFFFF / -1 uses the DZB group room lookup.'
+        edit_info.set('%s @ %08X\n%s'%(token['label'],token['address'],help_text))
+        sync_controls()
+    except Exception as exc:status.set('BG edit failed: '+str(exc))
+
+
+def handle_bg_input(click,right_click,wheel):
+    if click and TAB_H<=click[1]<TOP:
+        left=0
+        for mode,title,width in BG_SUBTABS:
+            if left<=click[0]<left+width:
+                cancel_edit();state.update(bg_table=mode,scroll=0,selected=None,dirty=True,world_detail=None)
+                if mode!='meshes':bg_records.refresh(tree,state['tick'])
+                break
+            left+=width
+        return
+    rows=bg_rows();body_top=TOP+HEAD_H
+    visible=max(1,(BODY_BOTTOM-body_top)//ROW_H)
+    if wheel:
+        state['scroll']=max(0,min(state['scroll']-int(round(wheel*3)),max(0,len(rows)-visible)))
+        state['dirty']=True
+    if right_click:
+        x,y=right_click
+        index=state['scroll']+int((y-body_top)//ROW_H)
+        address_x=BG_COLUMNS[-1][1] if state['bg_table']=='meshes' else BG_RECORD_COLUMNS[2][1]
+        if address_x<=x<W and body_top<=y<BODY_BOTTOM and 0<=index<len(rows):
+            row=rows[index]
+            try:
+                if state['bg_table']=='meshes':
+                    token=row.get('bg_edit') if row.get('child') else row.get('room_edit')
+                    if token is None:return
+                    address=world_view.validate_bg(tree,token)
+                else:
+                    bg_records.validate(tree,row['record'])
+                    address=row['address']
+                gui.set_clipboard('0x%08X'%address)
+                status.set('Copied address 0x%08X'%address)
+            except Exception as exc:status.set('Copy failed: '+str(exc))
+    if not click:return
+    x,y=click;index=state['scroll']+int((y-body_top)//ROW_H)
+    if not (body_top<=y<BODY_BOTTOM and 0<=index<len(rows)):return
+    row=rows[index];state.update(selected=row['key'],dirty=True)
+    if state['bg_table']=='meshes':
+        if row.get('section'):return
+        if row.get('child') and BG_COLUMNS[3][1]<=x<BG_COLUMNS[4][1]:
+            begin_bg_mesh_edit(row.get('bg_edit'))
+        elif not row.get('child') and BG_COLUMNS[4][1]<=x<BG_COLUMNS[5][1]:
+            begin_bg_mesh_edit(row.get('room_edit'))
+        elif x<BG_COLUMNS[1][1]:world_view.toggle_bg(row)
+        return
+    if row['field'] is None:
+        if x<BG_RECORD_COLUMNS[1][1]:
+            key=row['record']['key']
+            if key in bg_records.open:bg_records.open.remove(key)
+            else:bg_records.open.add(key)
+        return
+    if BG_RECORD_COLUMNS[1][1]<=x<BG_RECORD_COLUMNS[2][1]:
+        cancel_edit()
+        state['editor']={'bg_record':row}
+        edit_box.value=row['values'][1]
+        edit_info.set('%s @ %08X\nShared record: edits affect every user. Decimal or 0x hex.' %
+                      (row['field'],row['address']))
+        sync_controls()
+
+
+def draw_bg():
+    left=0
+    for mode,title,width in BG_SUBTABS:
+        canvas.rect_filled((left,TAB_H),(left+width,TOP),SEL if state['bg_table']==mode else HEAD)
+        canvas.text((left+8,TOP-8),TXT,title);left+=width
+    if state['bg_table']=='meshes':
+        draw_world_table();return
+    rows=bg_rows();body_top=TOP+HEAD_H
+    canvas.rect_filled((0,TOP),(W,body_top),HEAD)
+    for title,x in BG_RECORD_COLUMNS:
+        if x==0:title='Ti Record' if state['bg_table']=='ti' else 'DZB group'
+        canvas.text((x+8,body_top-9),DIM,title,size=10 if x==BG_RECORD_COLUMNS[2][1] else 13)
+    visible=max(1,(BODY_BOTTOM-body_top)//ROW_H)
+    state['scroll']=max(0,min(state['scroll'],max(0,len(rows)-visible)))
+    for slot,row in enumerate(rows[state['scroll']:state['scroll']+visible]):
+        y=body_top+slot*ROW_H
+        if row['key']==state['selected']:canvas.rect_filled((0,y),(W,y+ROW_H),SEL)
+        elif slot%2:canvas.rect_filled((0,y),(W,y+ROW_H),ZEBRA)
+        for col,((title,x),value) in enumerate(zip(BG_RECORD_COLUMNS,row['values'])):
+            right=BG_RECORD_COLUMNS[col+1][1] if col+1<len(BG_RECORD_COLUMNS) else W
+            if col==0:
+                value=(('v ' if row['record']['key'] in bg_records.open else '> ') if row['field'] is None else '  ')+value
+            canvas.text((x+8,y+TEXT_BASE),VAL if col==1 and row['field'] else TXT,fit(value,right-x-12))
+    if not rows:canvas.text((12,body_top+TEXT_BASE),DIM,bg_records.message)
+    if len(rows)>visible:
+        height=BODY_BOTTOM-body_top;bar=max(20,int(visible/len(rows)*height))
+        top=body_top+int(state['scroll']/len(rows)*height)
+        canvas.rect_filled((W-6,top),(W-2,top+bar),DIM)
+    help_text=('Ti records hold four packed words (info0..info3); triangles reference a shared record by index. Edits affect all referencing triangles.'
+               if state['bg_table']=='ti' else
+               'DZB groups form a mesh hierarchy, separate from Ti records. m_info: water 0x100, lava 0x200, poison 0x400, light 0x80000; none means normal. Category filtering uses root children (depth 2). Hierarchy edits do not rebuild spatial trees.')
+    selected=next((row for row in rows if row['key']==state['selected']),None)
+    detail=('\n'+', '.join(selected['record']['table']['labels'])) if selected else ''
+    shown=bg_records.message+'\n'+help_text+'\nStart: right-click to copy the exact record/field address.'+detail
+    if shown!=state.get('world_detail'):
+        world_details.set(shown);state['world_detail']=shown
+
+
 def draw_world_table():
     columns = BG_COLUMNS if tree.mode=='bg' else ZONE_SWITCH_COLUMNS
     rows=world_view.rows(tree.mode)
-    body_top=TOP+HEAD_H if tree.mode=='flags' else TOP
+    body_top=TOP+HEAD_H if tree.mode in ('bg','flags') else TOP
     visible=max(1,(BODY_BOTTOM-body_top)//ROW_H)
     state['scroll']=max(0,min(state['scroll'],max(0,len(rows)-visible)))
     header_columns=columns
@@ -857,7 +999,7 @@ def draw_world_table():
         header_columns=first.get('columns',ZONE_COLUMNS if first['key']==('zone-section','actors') else columns)
     canvas.rect_filled((0,body_top-HEAD_H),(W,body_top),HEAD)
     for title,x in header_columns:
-        canvas.text((x+8,body_top-9),DIM,title)
+        canvas.text((x+8,body_top-9),DIM,title,size=10 if tree.mode=='bg' and x==BG_COLUMNS[-1][1] else 13)
     for slot,row in enumerate(rows[state['scroll']:state['scroll']+visible]):
         y=body_top+slot*ROW_H
         if row.get('section'):
@@ -928,7 +1070,8 @@ def draw():
         draw_footer();canvas.commit()
         return
     if tree.mode in ('bg','zone'):
-        draw_world_table()
+        if tree.mode=='bg':draw_bg()
+        else:draw_world_table()
         draw_footer();canvas.commit()
         return
     if tree.mode=='flags':
@@ -1040,7 +1183,9 @@ def update():
         if tree.mode != "heaps":
             state["dirty"] = True
         if tree.mode=='colliders':collider_view.refresh(tree)
-        elif tree.mode in ('bg','zone'):world_view.refresh(tree)
+        elif tree.mode in ('bg','zone'):
+            world_view.refresh(tree)
+            if tree.mode=='bg' and state['bg_table']!='meshes':bg_records.refresh(tree,state['tick'])
         elif tree.mode=='flags':refresh_flags()
         elif tree.mode=='scls':refresh_scls()
     if tree.mode == "heaps":
@@ -1144,6 +1289,7 @@ def on_state_load(*_):
     close_heap_split()
     collider_view.reset()
     world_view.reset()
+    bg_records.reset()
     flag_view.reset();state['flag_detail']=None
     state.update(scls_tables={},scls_rows=[],selected=None)
     state['world_detail']=None

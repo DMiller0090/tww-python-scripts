@@ -1,24 +1,21 @@
-"""CPU-canvas stand-in for the fork's hardware (GPU) canvas.
+"""Collision Viewer's CPU renderer over Dolphin's plain canvas.
 
-collision_viewer.py normally renders through canvas.hardware_mesh / hardware_state / hud, which
-the fork implements with Direct3D 11 on Windows. This wrapper exposes the same three calls but draws
-with the plain CPU canvas (depth_triangle_filled / depth_triangle_wire / line / triangle_filled),
-so the viewer works on any build, including macOS builds without the GPU path.
-
-Anything it does not implement (mouse_pos, take_click, width, ...) falls through to the real canvas.
-Call flush() once per frame after the script has submitted its meshes, state and HUD.
+Retained geometry and HUD commands are projected together and submitted through
+CPU canvas primitives (depth_triangle_filled, depth_triangle_wire, line and text).
+The hardware_mesh/hardware_state method names are retained as an internal adapter
+interface; this module does not enable or submit to a GPU canvas.
 """
 import heapq
 from array import array
 
-NEAR = 5.0                  # same near plane as the hardware shader
+NEAR = 5.0                  # camera near clipping distance
 MAX_FILL_TRIS = 8000        # nearest triangles drawn when the camera is still
 MOVING_TRIS = 2500          # nearest triangles drawn while the camera is moving (then it refines)
 MAX_OVERLAY_TRIS = 20000    # trigger volumes / markers
 MAX_LINES = 30000           # trigger boxes, collider outlines, etc.
 CELL = 1500.0               # spatial grid cell size (world units) used to skip far-away geometry
 GRID_MIN_TRIS = 3000        # only build a grid for meshes at least this big
-TEXT_ASCENT = 12            # CPU-canvas text is baseline-anchored; the GPU HUD text is top-left anchored
+TEXT_ASCENT = 12            # translate top-left HUD anchors to CPU text baselines
 _U32 = "I" if array("I").itemsize == 4 else "L"
 
 
@@ -149,7 +146,6 @@ class SoftCanvas:
             self.last_error = ""
         except Exception as exc:  # never let a draw error take down the script's update loop
             self.last_error = "soft canvas: %r" % (exc,)
-            print(self.last_error)
 
     def _render(self, moving=False):
         cv = self._canvas

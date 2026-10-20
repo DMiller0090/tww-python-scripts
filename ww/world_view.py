@@ -6,7 +6,9 @@ from .zone_info import read_zone_tables, set_flag_numbers
 from .actor_switches import actor_switches
 
 BG_STATIC, BG_MOVABLE, BAD = 0xFF9CE3C0, 0xFFC792EA, 0xFFFF7070
-BG_COLUMNS = (('BG / field',0),('Owner',300),('bsPCID',590),('Value',680))
+BG_COLUMNS = (('BG / field',0),('Owner',300),('bsPCID',590),('Value',680),
+              ('mRoomNo',800),('Address (right-click to copy)',900))
+BG_ROOM_OFFSET = 0xB8
 ZONE_COLUMNS = (('Actor',0),('bsPCID',250),('RoomNo',330),('SwitchNo',405),
                 ('Scope',500),('Zone',580),('State',640),('Room source',760),('Use',900))
 ZONE_SWITCH_COLUMNS = (('Zone',0),('Room',80),('mSwitch[0]',160),('mSwitch[1]',270),
@@ -37,8 +39,11 @@ class WorldView:
             rows.append(row)
             if row.get('identity') in self.open_bg:
                 for label,value in row['fields']:
+                    token=row.get('field_edits',{}).get(label)
+                    address=token['address'] if token else None
                     rows.append(dict(key=row['key']+(label,),child=True,color=row['color'],
-                                     values=[label,'','',value],detail=row['detail']))
+                                     values=[label,'','',value,'','%08X'%address if address is not None else ''],
+                                     detail=row['detail'],bg_edit=token,address=address))
         return rows
 
     def toggle_bg(self, row):
@@ -64,6 +69,7 @@ class WorldView:
         base = GAME_INFO[tree.version] + PLAY_OFFSET
         registry = self.memory.read_bytes(base, 256*0x14)
         owners = {a['addr']: a for a in tree.actors}
+        stage=bytes(self.memory.read_bytes(base+0x5134,11))
         rows = []
         for slot in range(256):
             bgw, flags, pid, owner = struct.unpack_from('>4I', registry, slot*0x14)
@@ -71,28 +77,51 @@ class WorldView:
             kind, color, dzb = 'Unreadable', BAD, None
             process = owners.get(owner)
             name = process['name'] if process and process['pid']==pid else ('Unknown/stale' if owner else 'No owner')
-            fields = [('Registry slot address','%08X'%(base+slot*0x14)),
-                      ('Registry flags','0x%X'%flags),('Owner address','%08X'%owner),('cBgW','%08X'%bgw)]
+            context=dict(version=tree.version,stage=stage,slot=slot,
+                         registration=bytes(registry[slot*0x14:(slot+1)*0x14]),bgw=bgw,dzb=None,header=None)
+            fields=[('Registry slot address','%08X'%(base+slot*0x14))]
+            field_edits={}
+            def add(label,value,address,fmt='I',hex_value=False,scope='bgw'):
+                shown=('0x%X'%value if hex_value else str(value))
+                fields.append((label,shown))
+                field_edits[label]=dict(context=context,label=label,address=address,format=fmt,
+                                        raw=struct.pack('>'+fmt,value),scope=scope,hex=hex_value)
+            add('Registry flags',flags,base+slot*0x14+4,hex_value=True,scope='registry')
+            add('Owner address',owner,base+slot*0x14+0xC,hex_value=True,scope='registry')
+            add('cBgW',bgw,base+slot*0x14,hex_value=True,scope='registry')
+            room_edit=None;room=None;room_address=None
             details = 'Registered slot %d | cBgW %08X | registry flags 0x%X' % (slot,bgw,flags)
             try:
-                if not _ptr(bgw): raise ValueError('invalid cBgW pointer')
-                raw = self.memory.read_bytes(bgw,0xA8)
+                if not _ptr(bgw) or not _ptr(bgw+0xBB): raise ValueError('invalid cBgW pointer')
+                raw = self.memory.read_bytes(bgw,0xBC)
                 mesh_flags = raw[0x6C]
                 movable = bool(mesh_flags & 1) or (_ptr(owner) and not mesh_flags & 0x20)
                 kind = 'MoveBG' if movable else 'BG'
                 color = BG_MOVABLE if movable else BG_STATIC
                 vtx, dzb = struct.unpack_from('>2I',raw,0x90)
                 root = struct.unpack_from('>i',raw,0xA4)[0]
-                fields += [('cBgW flags','0x%02X'%mesh_flags),('DZB','%08X'%dzb),
-                           ('World vertex table','%08X'%vtx),('Root group',str(root))]
+                context['dzb']=dzb
+                add('cBgW flags',mesh_flags,bgw+0x6C,'B',True)
+                add('DZB',dzb,bgw+0x94,hex_value=True)
+                add('World vertex table',vtx,bgw+0x90,hex_value=True)
+                add('Root group',root,bgw+0xA4,'i')
+                room_address=bgw+BG_ROOM_OFFSET
+                room=struct.unpack_from('>H',raw,BG_ROOM_OFFSET)[0]
+                add('mRoomNo',room,room_address,'H')
+                room_edit=field_edits['mRoomNo']
+                add('mFlag',raw[0xBA],bgw+0xBA,'B',True)
+                add('mRoomNo2',raw[0xBB],bgw+0xBB,'B')
                 if not _ptr(dzb): raise ValueError('invalid DZB pointer')
                 data = self.memory.read_bytes(dzb,0x30)
                 vn,vt,tn,tt = struct.unpack_from('>iIiI',data)
                 gn,gt,pn,pt = struct.unpack_from('>iIiI',data,0x20)
-                fields += [('Vertex count',str(vn)),('Triangle count',str(tn)),
-                           ('Group count',str(gn)),('Property count',str(pn)),
-                           ('Local vertex table','%08X'%vt),('Triangle table','%08X'%tt),
-                           ('Group table','%08X'%gt),('Property table','%08X'%pt)]
+                context['header']=bytes(data)
+                for label,value,offset,fmt,hex_value in (
+                        ('Vertex count',vn,0,'i',False),('Triangle count',tn,8,'i',False),
+                        ('Group count',gn,0x20,'i',False),('Property count',pn,0x28,'i',False),
+                        ('Local vertex table',vt,4,'I',True),('Triangle table',tt,0xC,'I',True),
+                        ('Group table',gt,0x24,'I',True),('Property table',pt,0x2C,'I',True)):
+                    add(label,value,dzb+offset,fmt,hex_value,'dzb')
                 details = ('Slot %d | %s | owner %08X bsPCID %d | registry flags 0x%X / cBgW flags 0x%02X\n'
                            'cBgW %08X | DZB %08X | world vertices %08X | local vertices %08X\n'
                            'Triangles %08X | groups %08X | properties %08X | root group %d') % (
@@ -101,9 +130,14 @@ class WorldView:
             except Exception as exc:
                 details += '\nMesh data unavailable: '+str(exc)
                 fields.append(('Mesh data unavailable',str(exc)))
+            if room is not None:
+                details+='\nmRoomNo %d @%08X | 0xFFFF uses DZB group lookup. Root Address is mRoomNo; expanded Address is field storage.'%(room,room_address)
             rows.append(dict(key=('bg',slot),identity=(slot,bgw,dzb,owner,pid),kind=kind,
-                             values=['%s #%d'%(kind,slot),name,str(pid) if owner else '-',''],
-                             color=color,detail=details,fields=fields))
+                             values=['%s #%d'%(kind,slot),name,str(pid) if owner else '-','',
+                                     str(room) if room is not None else '-',
+                                     '%08X'%room_address if room_address is not None else ''],
+                             color=color,detail=details,fields=fields,field_edits=field_edits,
+                             room_edit=room_edit,address=room_address))
         self.open_bg.intersection_update(row['identity'] for row in rows)
         grouped = []
         for kind,color in (('MoveBG',BG_MOVABLE),('BG',BG_STATIC),('Unreadable',BAD)):
@@ -113,7 +147,42 @@ class WorldView:
                                 color=color,detail=''))
             grouped.extend(sorted(members,key=lambda row:row['key'][1]))
         self.tables['bg'] = grouped
-        self.messages['bg'] = '%d / 256 registered total | BG: green | MoveBG: purple | expand a row for mesh data' % len(rows)
+        self.messages['bg'] = '%d / 256 registered total | BG: green | MoveBG: purple | click mRoomNo or an expanded Value to edit; right-click Address to copy' % len(rows)
+
+    def validate_bg(self, tree, token):
+        if not token:raise ValueError('This field is derived or unavailable')
+        context=token['context']
+        if tree.mode!='bg' or tree.version!=context['version'] or bytes(self.memory.read_bytes(0x80000000,6))!=context['version'].encode('ascii'):
+            raise ValueError('Game/region changed; select the BG field again')
+        base=GAME_INFO[tree.version]+PLAY_OFFSET
+        if bytes(self.memory.read_bytes(base+0x5134,11))!=context['stage']:
+            raise ValueError('Stage changed; select the BG field again')
+        if bytes(self.memory.read_bytes(base+context['slot']*0x14,0x14))!=context['registration']:
+            raise ValueError('BG registration changed; select the field again')
+        if token['scope']!='registry':
+            if struct.unpack('>I',bytes(self.memory.read_bytes(context['bgw']+0x94,4)))[0]!=context['dzb']:
+                raise ValueError('DZB changed; select the field again')
+            if token['scope']=='dzb' and bytes(self.memory.read_bytes(context['dzb'],0x30))!=context['header']:
+                raise ValueError('DZB header changed; select the field again')
+        if bytes(self.memory.read_bytes(token['address'],len(token['raw'])))!=token['raw']:
+            raise ValueError('Field changed; select it again')
+        return token['address']
+
+    def write_bg(self, tree, token, text):
+        address=self.validate_bg(tree,token)
+        text=text.strip()
+        value=int(text,16) if text.lower().startswith('0x') else int(text,10)
+        if token['label']=='mRoomNo' and value==-1:value=0xFFFF
+        data=struct.pack('>'+token['format'],value)
+        try:
+            self.memory.write_bytes(address,bytearray(data))
+            if bytes(self.memory.read_bytes(address,len(data)))!=data:
+                raise ValueError('BG field readback failed')
+        except Exception:
+            self.memory.write_bytes(address,bytearray(token['raw']))
+            raise
+        self.refresh(tree)
+        return value
 
     def _zone_switch_address(self, tree, token, word):
         if tree.mode not in ('zone','flags') or tree.version!='GZLJ01' or token['version']!=tree.version:
