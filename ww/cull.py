@@ -1,6 +1,6 @@
 """ww.cull — self-contained TWW view-frustum culling scanner (JP/GZLJ01).
 
-Everything cull_viewer.py needs to read the live culling frustum + actor cull verdicts, with NO
+Everything collision_viewer.py needs to read the live culling frustum + actor cull verdicts, with NO
 external dependency — so cloning tww-python-scripts alone is enough to run the viewer. Reads go
 through a caller-supplied `rd` object exposing `read_bytes(gc_addr, n)` (big-endian GC memory).
 
@@ -11,7 +11,7 @@ fopAcCnd_NODRAW_e for 60/60 box actors (0 mismatches). f32 math uses `struct` (t
 Python has no _ctypes); struct 'f' round-trips IEEE single with round-half-to-even, bit-identical.
 If you change the cull logic, mirror it in tww_sim (or vice-versa) — the two must stay in sync.
 
-Addresses confirmed live 2026-07-05 (see tww_sim/knowledge/mechanics/culling.md):
+Addresses confirmed live 2026-07-05:
   camera_class = [[0x803AD380]+0x34]; mDoLib_clipper static 0x80398bfc; actor list head 0x803654CC.
 """
 import os, struct, math

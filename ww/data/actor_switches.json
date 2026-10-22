@@ -1,0 +1,828 @@
+{
+  "version": 1,
+  "actors": {
+    "437": [
+      {
+        "label": "Stored switch request",
+        "offset": 1588,
+        "format": "B",
+        "room": "field",
+        "room_field": {
+          "offset": 1586,
+          "format": "B"
+        },
+        "source": "d_a_agb.cpp:846"
+      }
+    ],
+    "438": [
+      {
+        "label": "getSw0()",
+        "room": "home",
+        "source": "d_a_agbsw0.cpp:1158",
+        "offset": 176,
+        "format": "I",
+        "shift": 16,
+        "mask": 255
+      },
+      {
+        "label": "getSw1()",
+        "room": "home",
+        "source": "d_a_agbsw0.cpp:1200",
+        "offset": 176,
+        "format": "I",
+        "shift": 24,
+        "mask": 255
+      }
+    ],
+    "22": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_alldie.cpp:45",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "309": [
+      {
+        "label": "mSwitchToSet",
+        "room": "current",
+        "source": "d_a_andsw0.cpp:48",
+        "offset": 667,
+        "format": "B"
+      },
+      {
+        "label": "mSwitchToSet",
+        "room": "home",
+        "source": "d_a_andsw0.cpp:120",
+        "offset": 667,
+        "format": "B"
+      }
+    ],
+    "310": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_andsw2.cpp:95",
+        "offset": 176,
+        "format": "I",
+        "shift": 16,
+        "mask": 255
+      }
+    ],
+    "240": [
+      {
+        "label": "0x80",
+        "room": "current",
+        "source": "d_a_bdk.cpp:2064",
+        "const": 128
+      }
+    ],
+    "298": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_bflower.cpp:425",
+        "offset": 1424,
+        "format": "i"
+      }
+    ],
+    "190": [
+      {
+        "label": "Death switch",
+        "room": "current",
+        "source": "d_a_bk.cpp:2645",
+        "offset": 696,
+        "format": "B",
+        "disabled": [
+          0,
+          255
+        ]
+      },
+      {
+        "label": "Demo switch",
+        "room": "current",
+        "source": "d_a_bk.cpp:3994",
+        "const": 224,
+        "overlay": false
+      },
+      {
+        "label": "Demo switch",
+        "room": "current",
+        "source": "d_a_bk.cpp:4063",
+        "const": 225,
+        "overlay": false
+      }
+    ],
+    "212": [
+      {
+        "label": "Lamp switch +0",
+        "offset": 990,
+        "format": "B",
+        "room": "current",
+        "add": 0,
+        "source": "d_a_bpw.cpp:856-895"
+      },
+      {
+        "label": "Lamp switch +1",
+        "offset": 990,
+        "format": "B",
+        "room": "current",
+        "add": 1,
+        "source": "d_a_bpw.cpp:856-895"
+      },
+      {
+        "label": "Lamp switch +2",
+        "offset": 990,
+        "format": "B",
+        "room": "current",
+        "add": 2,
+        "source": "d_a_bpw.cpp:856-895"
+      }
+    ],
+    "226": [
+      {
+        "label": "mSwitchNo",
+        "room": "current",
+        "source": "d_a_daiocta.cpp:1264",
+        "offset": 1396,
+        "format": "B"
+      }
+    ],
+    "302": [
+      {
+        "label": "Front door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 0,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 0,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "equals": 0
+        },
+        "source": "d_a_door10.cpp:147"
+      },
+      {
+        "label": "Back door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 20,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 6,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "not_equals": 0
+        },
+        "source": "d_a_door10.cpp:147"
+      }
+    ],
+    "303": [
+      {
+        "label": "Front door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 0,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 0,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "equals": 0
+        },
+        "source": "d_a_door12.cpp:169"
+      },
+      {
+        "label": "Back door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 20,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 6,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "not_equals": 0
+        },
+        "source": "d_a_door12.cpp:169"
+      }
+    ],
+    "186": [
+      {
+        "label": "m508 - 1",
+        "room": "current",
+        "source": "d_a_ep.cpp:226",
+        "offset": 1288,
+        "format": "B",
+        "add": -1
+      }
+    ],
+    "243": [
+      {
+        "label": "m2BF",
+        "room": "current",
+        "source": "d_a_fganon.cpp:1756",
+        "offset": 703,
+        "format": "B"
+      },
+      {
+        "label": "mSwitchNo",
+        "room": "current",
+        "source": "d_a_fganon.cpp:1911",
+        "offset": 702,
+        "format": "B"
+      }
+    ],
+    "98": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_floor.cpp:86",
+        "offset": 724,
+        "format": "i"
+      }
+    ],
+    "42": [
+      {
+        "label": "m478",
+        "room": "home",
+        "source": "d_a_hmlif.cpp:337",
+        "offset": 1144,
+        "format": "I"
+      }
+    ],
+    "456": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_hys.cpp:178",
+        "offset": 1108,
+        "format": "I"
+      }
+    ],
+    "306": [
+      {
+        "label": "Front door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 0,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 0,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "equals": 0
+        },
+        "source": "d_a_kddoor.cpp:139"
+      },
+      {
+        "label": "Back door switch",
+        "offset": 176,
+        "format": "I",
+        "room": "field",
+        "shift": 20,
+        "mask": 255,
+        "room_field": {
+          "offset": 476,
+          "format": "H",
+          "shift": 6,
+          "mask": 63
+        },
+        "when": {
+          "offset": 672,
+          "format": "B",
+          "not_equals": 0
+        },
+        "source": "d_a_kddoor.cpp:139"
+      }
+    ],
+    "100": [
+      {
+        "label": "m2A2",
+        "room": "current",
+        "source": "d_a_kokiie.cpp:134",
+        "offset": 674,
+        "format": "B"
+      }
+    ],
+    "252": [
+      {
+        "label": "mSwitchNo",
+        "room": "current",
+        "source": "d_a_kui.cpp:189",
+        "offset": 675,
+        "format": "B"
+      }
+    ],
+    "117": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_mbdoor.cpp:441",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "93": [
+      {
+        "label": "m2A1",
+        "room": "current",
+        "source": "d_a_mflft.cpp:217",
+        "offset": 673,
+        "format": "B"
+      }
+    ],
+    "189": [
+      {
+        "label": "Death switch",
+        "room": "current",
+        "source": "d_a_mo2.cpp:2409",
+        "offset": 704,
+        "format": "B",
+        "disabled": [
+          0,
+          255
+        ]
+      }
+    ],
+    "367": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_npc_hr.cpp:682",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "382": [
+      {
+        "label": "getPrmSwitchBit()",
+        "room": "home",
+        "source": "d_a_npc_mn.cpp:660",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      },
+      {
+        "label": "getPrmSwitchBit2()",
+        "room": "home",
+        "source": "d_a_npc_mn.cpp:1003",
+        "offset": 176,
+        "format": "I",
+        "shift": 16,
+        "mask": 255
+      }
+    ],
+    "316": [
+      {
+        "label": "field_0x794",
+        "room": "current",
+        "source": "d_a_npc_os.cpp:1608",
+        "offset": 1940,
+        "format": "I"
+      }
+    ],
+    "65": [
+      {
+        "label": "field_0x295",
+        "room": "current",
+        "source": "d_a_obj_canon.cpp:380",
+        "offset": 661,
+        "format": "B"
+      }
+    ],
+    "472": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_correct.cpp:283",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "58": [
+      {
+        "label": "getSwitchNo()",
+        "room": "home",
+        "source": "d_a_obj_dragonhead.cpp:152",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "164": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_ebomzo.cpp:136",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "162": [
+      {
+        "label": "param_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_eskban.cpp:354",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "50": [
+      {
+        "label": "prm_get_swSave2()",
+        "room": "home",
+        "source": "d_a_obj_hami3.cpp:150",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "292": [
+      {
+        "label": "mSwitchNo",
+        "room": "current",
+        "source": "d_a_obj_hsehi1.cpp:720",
+        "offset": 1292,
+        "format": "i"
+      }
+    ],
+    "71": [
+      {
+        "label": "field_0x2CC",
+        "room": "current",
+        "source": "d_a_obj_majyuu_door.cpp:219",
+        "offset": 716,
+        "format": "B"
+      }
+    ],
+    "77": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_mkie.cpp:365",
+        "offset": 176,
+        "format": "I",
+        "shift": 16,
+        "mask": 255
+      }
+    ],
+    "78": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_mkiek.cpp:174",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "79": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_mknjd.cpp:473",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "281": [
+      {
+        "label": "prm_get_swSave2()",
+        "room": "home",
+        "source": "d_a_obj_tenmado.cpp:41",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "56": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_vfan.cpp:191",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "54": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_vmc.cpp:260",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "53": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_obj_volcano.cpp:282",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "67": [
+      {
+        "label": "m2AC",
+        "room": "stay",
+        "source": "d_a_obj_warpt.cpp:396",
+        "offset": 684,
+        "format": "i"
+      }
+    ],
+    "180": [
+      {
+        "label": "mSwitchA",
+        "room": "current",
+        "source": "d_a_oship.cpp:724",
+        "offset": 689,
+        "format": "B"
+      }
+    ],
+    "401": [
+      {
+        "label": "mBottomHalfDestroyedSwitch",
+        "room": "home",
+        "source": "d_a_saku.cpp:371",
+        "offset": 3840,
+        "format": "I"
+      },
+      {
+        "label": "mTopHalfDestroyedSwitch",
+        "room": "home",
+        "source": "d_a_saku.cpp:374",
+        "offset": 3844,
+        "format": "I"
+      }
+    ],
+    "191": [
+      {
+        "label": "Death switch",
+        "room": "current",
+        "source": "d_a_st.cpp:1237",
+        "offset": 696,
+        "format": "B",
+        "disabled": [
+          0,
+          255
+        ]
+      }
+    ],
+    "460": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_stone.cpp:503",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "461": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_stone2.cpp:111",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "312": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_swattack.cpp:116",
+        "offset": 1036,
+        "format": "I"
+      }
+    ],
+    "300": [
+      {
+        "label": "daSwc00_getSw1No()",
+        "room": "current",
+        "source": "d_a_swc00.cpp:21",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "457": [
+      {
+        "label": "getSwNo()",
+        "room": "current",
+        "source": "d_a_swhit0.cpp:230",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "314": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_swtact.cpp:170",
+        "offset": 672,
+        "format": "I"
+      }
+    ],
+    "412": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_tag_event.cpp:228",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "28": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_tag_evsw.cpp:15",
+        "offset": 176,
+        "format": "I",
+        "shift": 0,
+        "mask": 255
+      }
+    ],
+    "413": [
+      {
+        "label": "Hint switch 1",
+        "offset": 176,
+        "format": "I",
+        "room": "current",
+        "shift": 8,
+        "mask": 255,
+        "source": "d_a_tag_hint.cpp:152-162,459,749"
+      },
+      {
+        "label": "Hint switch 2",
+        "offset": 176,
+        "format": "I",
+        "room": "current",
+        "shift": 16,
+        "mask": 255,
+        "source": "d_a_tag_hint.cpp:152-162,459,749"
+      }
+    ],
+    "416": [
+      {
+        "label": "getSwbit()",
+        "room": "current",
+        "source": "d_a_tag_island.cpp:408",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "475": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_tag_light.cpp:453",
+        "offset": 176,
+        "format": "I",
+        "shift": 16,
+        "mask": 255
+      }
+    ],
+    "414": [
+      {
+        "label": "Message switch",
+        "offset": 176,
+        "format": "I",
+        "room": "current",
+        "shift": 8,
+        "mask": 255,
+        "source": "d_a_tag_msg.cpp:186"
+      }
+    ],
+    "36": [
+      {
+        "label": "prm_get_swSave()",
+        "room": "home",
+        "source": "d_a_tag_volcano.cpp:36",
+        "offset": 176,
+        "format": "I",
+        "shift": 8,
+        "mask": 255
+      }
+    ],
+    "294": [
+      {
+        "label": "openSwNo",
+        "room": "field",
+        "source": "d_a_tbox.cpp:863",
+        "offset": 480,
+        "format": "H",
+        "mask": 255,
+        "room_field": {
+          "offset": 656,
+          "format": "i"
+        }
+      },
+      {
+        "label": "getSwNo()",
+        "room": "field",
+        "source": "d_a_tbox.cpp:1044",
+        "offset": 176,
+        "format": "I",
+        "shift": 12,
+        "mask": 255,
+        "room_field": {
+          "offset": 656,
+          "format": "i"
+        }
+      }
+    ],
+    "192": [
+      {
+        "label": "Death switch",
+        "room": "current",
+        "source": "d_a_tn.cpp:2071",
+        "offset": 704,
+        "format": "B",
+        "disabled": [
+          0,
+          255
+        ]
+      }
+    ],
+    "433": [
+      {
+        "label": "mSwitchNo",
+        "room": "home",
+        "source": "d_a_wall.cpp:303",
+        "offset": 1500,
+        "format": "i"
+      }
+    ]
+  }
+}

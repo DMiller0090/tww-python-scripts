@@ -45,7 +45,7 @@ def angles_from_forward(forward):
 class ViewerCamera:
     near = 5.0
 
-    def __init__(self, position, forward, up=None, *, width, height, focal):
+    def __init__(self, position, forward, up=None, *, width, height, focal, focal_x=None):
         self.position = tuple(position)
         self.forward = normalize(forward)
         basis_up = up if up is not None and dot(up, up) > 0.000001 else (0.0, 1.0, 0.0)
@@ -54,13 +54,14 @@ class ViewerCamera:
         self.width = float(width)
         self.height = float(height)
         self.focal = float(focal)
+        self.focal_x = self.focal if focal_x is None else float(focal_x)
 
     def project(self, point):
         relative = sub(point, self.position)
         depth = dot(relative, self.forward)
         if depth <= self.near:
             return None
-        return ((self.width * 0.5 + self.focal * dot(relative, self.right) / depth,
+        return ((self.width * 0.5 + self.focal_x * dot(relative, self.right) / depth,
                  self.height * 0.5 - self.focal * dot(relative, self.up) / depth),
                 depth)
 
@@ -68,6 +69,6 @@ class ViewerCamera:
 def screen_ray(camera, screen_point):
     return normalize(tuple(
         camera.forward[index] +
-        camera.right[index] * (screen_point[0] - camera.width * 0.5) / camera.focal -
+        camera.right[index] * (screen_point[0] - camera.width * 0.5) / camera.focal_x -
         camera.up[index] * (screen_point[1] - camera.height * 0.5) / camera.focal
         for index in range(3)))

@@ -91,6 +91,18 @@ def attack_type_names(damage_type):
     return names
 
 
+def physical_collision_name(co_sprm):
+    """cCcD_CoSPrm filter groups and correction mode (c_cc_d.h/c_cc_s.cpp)."""
+    def groups(mask):
+        if mask==7:return 'All'
+        return '/'.join(name for bit,name in ((1,'Enemy'),(2,'Player'),(4,'Other')) if mask & bit) or 'None'
+    # Is-group occupies bits 1..3; versus-group occupies bits 4..6.
+    mode='no push' if co_sprm & 0x100 else ('3D push if both allow' if co_sprm & 0x80 else 'horizontal push')
+    membership=(co_sprm>>1)&7;contacts=(co_sprm>>4)&7
+    own='All groups' if membership==7 else ('No group' if not membership else groups(membership)+' group')
+    return '%s; contacts %s; %s' % (own,'any group' if contacts==7 else groups(contacts),mode)
+
+
 def target_type_name(target_type):
     set_names = [name for flag, name in ATTACK_TYPE_FLAGS if target_type & flag]
     clear_names = [name for flag, name in ATTACK_TYPE_FLAGS if not target_type & flag]

@@ -10,7 +10,7 @@ single `read_bytes(gc_addr, n) -> bytes` method over big-endian GC RAM; all type
 on top of it with `struct`. No dependency on `ww.memory` or the `dolphin` module, so it imports and
 type-checks outside Dolphin.
 
-RAM model (JP/GZLJ01, validated live 2026-07-06 on stage H_test; see knowledge/mechanics/collision.md):
+RAM model (JP/GZLJ01, validated live 2026-07-06 on stage H_test):
 
   dBgS manager @ 0x803B93A8  ( = g_dComIfG_gameInfo 0x803B8108 + play 0x12A0 )
   cBgS::m_chk_element[256]  (stride 0x14)   each slot:
@@ -138,6 +138,13 @@ def _read_mesh(r, bgw, actor_owned=False):
     if not (_valid(v_tbl) and _valid(t_tbl)):
         return None
     cbgw_flags = r.u8(bgw + OFF_CBGW_FLAGS)
+    g_num, g_tbl = r.s32(pm_bgd + 0x20), r.u32(pm_bgd + 0x24)
+    groups = []
+    if 0 < g_num < 65536 and _valid(g_tbl):
+        group_bytes = r.block(g_tbl, g_num * 0x34)
+        groups = [(struct.unpack_from(">H", group_bytes, i * 0x34 + 0x24)[0],
+                   struct.unpack_from(">I", group_bytes, i * 0x34 + 0x30)[0]) for i in range(g_num)]
+    root_group = r.s32(bgw + 0xA4)
 
     # Bulk-read the whole vertex + triangle tables (2 reads, not thousands).
     vbytes = r.block(v_tbl, v_num * 12)
@@ -149,6 +156,7 @@ def _read_mesh(r, bgw, actor_owned=False):
     ti_bytes = b""
     if 0 < ti_num < 600000 and _valid(ti_tbl):
         ti_bytes = r.block(ti_tbl, ti_num * 16)
+    ti_words = [struct.unpack_from(">4I", ti_bytes, i * 16) for i in range(len(ti_bytes) // 16)]
     tris = []
     exit_ids = []
     # Match dBgS::GetSpecialCode/GetGroundCode.  Link's slide setup only
@@ -175,12 +183,15 @@ def _read_mesh(r, bgw, actor_owned=False):
     # (tri_normal) and classify path for thousands of static triangles.
     centroids = []
     classes = []
+    normals = []
     for a, b, c, tid, grp in tris:
         v0 = verts[a]; v1 = verts[b]; v2 = verts[c]
         centroids.append(((v0[0]+v1[0]+v2[0]) / 3.0,
                           (v0[1]+v1[1]+v2[1]) / 3.0,
                           (v0[2]+v1[2]+v2[2]) / 3.0))
-        classes.append(classify(tri_normal(v0, v1, v2)[1]))
+        normal = tri_normal(v0, v1, v2)
+        normals.append(normal)
+        classes.append(classify(normal[1]))
 
     return {
         "bgw": bgw,
@@ -194,6 +205,12 @@ def _read_mesh(r, bgw, actor_owned=False):
         "t_num": t_num,
         "ti_num": ti_num,
         "ti_tbl": ti_tbl,
+        "t_tbl": t_tbl,
+        "ti_words": ti_words,
+        "groups": groups,
+        "root_group": root_group,
+        "normals": normals,
+        "property_revision": 0,
         "verts": verts,
         "tris": tris,
         "exit_ids": exit_ids,
@@ -251,15 +268,21 @@ def read_collision(rd, cache=None):
                        and prev["v_tbl"] == v_tbl and prev.get("ti_num") == ti_num
                        and prev.get("ti_tbl") == ti_tbl)
         if same_source and immutable:
+            prev["actor"] = r.u32(e + OFF_BGW_ACTOR)
+            prev["actor_id"] = r.u32(e + 8)
             meshes[i] = prev            # unchanged static room mesh — reuse cached tables
             continue
         if same_source and _read_vertex_probe(r, v_tbl, v_num) == prev.get("vertex_probe"):
             # Moveable collision is ordinarily a rigid transform. Avoid decoding and
             # uploading an unchanged world table, but rebuild as soon as its pose differs.
+            prev["actor"] = r.u32(e + OFF_BGW_ACTOR)
+            prev["actor_id"] = r.u32(e + 8)
             meshes[i] = prev
             continue
         m = _read_mesh(r, bgw, actor_owned)
         if m is not None:
+            m["actor"] = r.u32(e + OFF_BGW_ACTOR)
+            m["actor_id"] = r.u32(e + 8)
             meshes[i] = m
 
     return {
